@@ -1,0 +1,79 @@
+name: README quickstarts
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: readme-quickstarts-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quickstarts:
+    name: CLI quickstarts (Linux, disposable fallback vault)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      GOTOOLCHAIN: local
+    steps:
+      - name: Check out source without persisted credentials
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up the toolchain declared by the project
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Verify dependencies and install the documented CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+          go version
+          go mod download
+          go mod verify
+          mkdir -p "$RUNNER_TEMP/sentinel-bin"
+          GOBIN="$RUNNER_TEMP/sentinel-bin" go install ./cmd/sentinel
+
+      - name: Exercise README command contracts and CLI round trips
+        shell: bash
+        run: |
+          set -euo pipefail
+          command -v python3
+          command -v curl
+          python3 scripts/test-readme-quickstarts.py --sentinel "$RUNNER_TEMP/sentinel-bin/sentinel"
+
+      - name: Run CLI and core package tests
+        run: go test -count=1 -timeout=120s ./internal/... ./cmd/sentinel
+
+      - name: Vet CLI and core packages
+        run: go vet ./internal/... ./cmd/sentinel
+
+      - name: Record test scope
+        if: always()
+        shell: bash
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" <<'SUMMARY'
+          ## README quickstarts
+          See step results for pass/fail; this summary is not a success assertion.
+
+          * Both READMEs must retain the tested CLI examples and MCP JSON contract.
+          * The CLI is installed using `go install ./cmd/sentinel` with Go from `go.mod`.
+          * Smoke tests assert init persistence, add/list, stdin/file scan findings,
+            HTTP proxy routing and injection, and MCP inject/proxy stdio round trips.
+          * Only disposable values and loopback HTTP fixtures are used. No repository
+            secrets, external API accounts or root certificate installation are required.
+          * Headless smoke tests intentionally force the existing plaintext fallback
+            inside a temporary HOME. This is not approval of that storage design and
+            does not test native keychains, GUI interoperability, HTTPS interception,
+            third-party MCP clients, or Windows/macOS installation.
+          * Toolchain availability, dependency resolution and runtime failures fail CI;
+            there is no silent downgrade or continue-on-error.
+          SUMMARY
