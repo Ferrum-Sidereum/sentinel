@@ -1,0 +1,48 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  go:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go build ./cmd/sentinel/... ./internal/...
+      - run: go vet ./cmd/sentinel/... ./internal/...
+      - run: go test -race ./cmd/sentinel/... ./internal/...
+      - run: test -z "$(gofmt -l .)" || (gofmt -l . && exit 1)
+        shell: bash
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci && npm run typecheck
+        working-directory: cmd/sentinel-gui/frontend
+
+  staticcheck:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go run honnef.co/go/tools/cmd/staticcheck@latest ./cmd/sentinel/... ./internal/...
+
+  govulncheck:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go run golang.org/x/vuln/cmd/govulncheck@latest ./cmd/sentinel/... ./internal/...

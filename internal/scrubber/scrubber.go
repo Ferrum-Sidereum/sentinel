@@ -16,16 +16,16 @@ import (
 
 type Finding struct {
 	Type       string
-	Span      [2]int
-	Value     string
+	Span       [2]int
+	Value      string
 	Confidence float64
 	Detector   string
 }
 
 type rule struct {
-	typ  string
-	re   *regexp.Regexp
-	conf float64
+	typ   string
+	re    *regexp.Regexp
+	conf  float64
 	valid func(string) bool
 }
 
@@ -84,7 +84,7 @@ func validINN12(s string) bool {
 	return int(d[10]-'0') == s1%11%10 && int(d[11]-'0') == s2%11%10
 }
 
- func rules() []rule {
+func rules() []rule {
 	return []rule{
 		{"EMAIL", mustRe(`[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}`), 0.95, nil},
 		{"PHONE_RU", mustRe(`\+7[\s\-]?\(?\d{3}\)?[\s\-]?\d{3}[\s\-]?\d{2}[\s\-]?\d{2}`), 0.95, nil},
@@ -196,12 +196,12 @@ const maxScanBytes = 1 << 20
 const maxJSONDepth = 32
 
 type Session struct {
-	mu   sync.Mutex
-	Map  map[string]string // alias -> real
-	Rev  map[string]string // real -> alias
-	TTL  time.Time
-	Key  []byte
-	ctr  map[string]int
+	mu  sync.Mutex
+	Map map[string]string // alias -> real
+	Rev map[string]string // real -> alias
+	TTL time.Time
+	Key []byte
+	ctr map[string]int
 }
 
 func NewSession(ttl time.Duration) *Session {
@@ -521,7 +521,10 @@ func Apply(text string, findings []Finding, mode string, sess *Session, threshol
 		}
 	}
 	// replace from end to keep spans valid
-	type rep struct{ s, e int; with string }
+	type rep struct {
+		s, e int
+		with string
+	}
 	var reps []rep
 	for _, f := range findings {
 		if f.Confidence < threshold || allowSkip(f) {

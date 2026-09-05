@@ -5,13 +5,14 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"time"
 	"sentinel/internal/audit"
 	"sentinel/internal/ca"
 	"sentinel/internal/egress"
 	"sentinel/internal/llm"
 	"sentinel/internal/policy"
+	"time"
 )
+
 func cmdTrustCA() {
 	a, err := ca.LoadOrCreate()
 	if err != nil {

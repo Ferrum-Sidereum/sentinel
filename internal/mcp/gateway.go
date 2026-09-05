@@ -136,9 +136,9 @@ func runInner(args []string, mode string, st *vault.Store, p *policy.Policy, l *
 				writeErr(os.Stdout, bad)
 				continue
 			}
-		// de-tokenize aliases in args
-		line = sess.Rehydrate(line)
-		stdin.Write([]byte(line + "\n"))
+			// de-tokenize aliases in args
+			line = sess.Rehydrate(line)
+			stdin.Write([]byte(line + "\n"))
 		}
 	}()
 	// server -> LLM direction: scrub text fields; L0 vault-match always on

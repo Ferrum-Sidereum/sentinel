@@ -10,10 +10,10 @@ import (
 )
 
 type Metrics struct {
-	findings   sync.Map // type -> *atomic.Int64
-	latN       atomic.Int64
+	findings    sync.Map // type -> *atomic.Int64
+	latN        atomic.Int64
 	latSumNanos atomic.Int64
-	latBuckets sync.Map // le string -> *atomic.Int64
+	latBuckets  sync.Map // le string -> *atomic.Int64
 }
 
 var bounds = []float64{0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1, 5}
