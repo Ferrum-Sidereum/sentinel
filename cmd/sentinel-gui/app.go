@@ -15,6 +15,7 @@ import (
  "time"
  "unicode/utf8"
  "gopkg.in/yaml.v3"
+ "sentinel/internal/audit"
  "sentinel/internal/placeholder"
  "sentinel/internal/policy"
  "sentinel/internal/scrubber"
@@ -150,6 +151,18 @@ func (a *App) DeleteSecret(name, confirmation string) ([]SecretInfo, error) {
  if !exists { return nil, errors.New("That entry no longer exists. Refresh the vault.") }
  if err := st.Delete(name); err != nil { return nil, errors.New("The secret could not be deleted.") }
  return secretInfos(st)
+}
+func (a *App) RevealSecret(name, confirmation string) (string, error) {
+ if err := a.lock(); err != nil { return "", err }; defer a.mu.Unlock()
+ if name == "" || confirmation != name { return "", errors.New("Type the exact stored name to confirm reveal.") }
+ st, key, err := a.openStore()
+ if err != nil { return "", err }; defer closeStore(st, key)
+ sec, err := st.Get(name)
+ if err != nil { return "", errors.New("That entry no longer exists. Refresh the vault.") }
+ defer wipe(sec.Value)
+ if l, err := audit.Open(filepath.Join(a.dir, "audit.jsonl")); err == nil && l != nil { l.Log("", "secret_revealed", map[string]any{"name": name}); l.Close() }
+ out := append([]byte(nil), sec.Value...)
+ return string(out), nil
 }
 func (a *App) Scan(text string) (result ScanResult, err error) {
  if err = a.lock(); err != nil { return result, err }; defer a.mu.Unlock()

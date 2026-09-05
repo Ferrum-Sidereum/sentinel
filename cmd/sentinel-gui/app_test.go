@@ -56,6 +56,17 @@ func TestSecretCRUDDoesNotRevealOrOverwrite(t *testing.T) {
  rows, err = a.DeleteSecret("snt://demo", "snt://demo")
  if err != nil || len(rows) != 0 { t.Fatalf("delete: %v", err) }
 }
+func TestRevealRequiresConfirmationAndAudits(t *testing.T) {
+ a := testApp(t)
+ if _, err := a.AddSecret("demo", "synthetic-sensitive-value"); err != nil { t.Fatal(err) }
+ if _, err := a.RevealSecret("snt://demo", "wrong"); err == nil { t.Fatal("confirmation bypass") }
+ v, err := a.RevealSecret("snt://demo", "snt://demo")
+ if err != nil || v != "synthetic-sensitive-value" { t.Fatalf("reveal: %v", err) }
+ raw, err := os.ReadFile(filepath.Join(a.dir, "audit.jsonl"))
+ if err != nil { t.Fatal(err) }
+ if !bytes.Contains(raw, []byte("secret_revealed")) { t.Fatal("reveal not audited") }
+ if bytes.Contains(raw, []byte("synthetic-sensitive-value")) { t.Fatal("audit contains value") }
+}
 func TestPreservesExistingHostBindingMetadata(t *testing.T) {
  a := testApp(t); st, key, err := a.openStore(); if err != nil { t.Fatal(err) }
  if err := st.Put(vault.Secret{Name: "snt://bound", Value: []byte("synthetic-bound"), Hosts: []string{"example.test"}, InjectHdr: []string{"Authorization"}}); err != nil { t.Fatal(err) }
