@@ -1,0 +1,16 @@
+// Cursor MCP config (~/.cursor/mcp.json).
+// stdio via sentinel (secret injected as real value for child only):
+// stdio via proxy mode (placeholders stay; traffic via egress proxy):
+{
+  "mcpServers": {
+    "github-stdio": {
+      "command": "sentinel",
+      "args": ["mcp", "run", "--mode", "inject", "--", "npx", "-y", "@modelcontextprotocol/server-github"],
+      "env": { "GITHUB_TOKEN": "snt://github_pat" }
+    },
+    "remote-http": {
+      "url": "http://127.0.0.1:18450/mcp",
+      "headers": { "Authorization": "Bearer snt://remote_mcp_token" }
+    }
+  }
+}

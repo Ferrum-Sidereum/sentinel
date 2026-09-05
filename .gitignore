@@ -1,0 +1,21 @@
+# Binaries
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Build output
+dist/
+bin/
+
+# Secrets / local config
+.env
+*.pem
+*.key
+
+# OS / editor
+Thumbs.db
+Desktop.ini
+.vscode/
+.idea/
