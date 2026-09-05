@@ -28,8 +28,8 @@ type Policy struct {
 	} `yaml:"defaults"`
 	Hosts          map[string]HostRule   `yaml:"hosts"`
 	Entities       map[string]EntityRule `yaml:"entities"`
-	CustomPatterns map[string]string    `yaml:"custom_patterns"`
-	Allowlist struct {
+	CustomPatterns map[string]string     `yaml:"custom_patterns"`
+	Allowlist      struct {
 		Values   []string `yaml:"values"`
 		Domains  []string `yaml:"domains"`
 		Patterns []string `yaml:"patterns"`
@@ -39,6 +39,7 @@ type Policy struct {
 		Retention string `yaml:"retention"`
 	} `yaml:"audit"`
 }
+
 func Default() Policy {
 	var p Policy
 	p.Defaults.UnknownHost = "tunnel"

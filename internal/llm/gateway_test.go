@@ -15,7 +15,9 @@ func TestGatewayPseudoRehydrate(t *testing.T) {
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		b, _ := io.ReadAll(r.Body)
 		var m struct {
-			Messages []struct{ Content string `json:"content"` } `json:"messages"`
+			Messages []struct {
+				Content string `json:"content"`
+			} `json:"messages"`
 		}
 		json.Unmarshal(b, &m)
 		got := m.Messages[0].Content
