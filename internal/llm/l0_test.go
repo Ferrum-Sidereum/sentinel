@@ -8,11 +8,41 @@ import (
 	"testing"
 
 	"sentinel/internal/policy"
+	"sentinel/internal/scrubber"
 )
 
 type mapVault map[string]string
 
-func (m mapVault) ValuesSnapshot() map[string]string { return map[string]string(m) }
+func (m mapVault) NewMatcher() (scrubber.VaultMatcher, error) { return testMapMatcher(m), nil }
+
+type testMapMatcher map[string]string
+
+func (m testMapMatcher) FindAll(text string) []scrubber.Match {
+	var out []scrubber.Match
+	for name, val := range m {
+		for i := 0; i+len(val) <= len(text); {
+			j := indexOf(text[i:], val)
+			if j < 0 {
+				break
+			}
+			s := i + j
+			out = append(out, scrubber.Match{Name: name, Start: s, End: s + len(val)})
+			i = s + len(val)
+		}
+	}
+	return out
+}
+
+func (m testMapMatcher) Close() {}
+
+func indexOf(hay, needle string) int {
+	for i := 0; i+len(needle) <= len(hay); i++ {
+		if hay[i:i+len(needle)] == needle {
+			return i
+		}
+	}
+	return -1
+}
 
 // L0: real vault value must never reach upstream, even with pseudonymize default.
 func TestL0VaultMatchBlocked(t *testing.T) {

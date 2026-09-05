@@ -76,11 +76,14 @@ func ServeHTTP(addr, upstream string, st *vault.Store, p *policy.Policy, l *audi
 				return err
 			}
 			resp.Body.Close()
-			var vv map[string]string
+			var vm vault.Matcher
 			if st != nil {
-				vv = st.ValuesSnapshot()
+				if m, err := st.NewMatcher(); err == nil {
+					vm = m
+					defer m.Close()
+				}
 			}
-			out := scrubBody(string(body), vv, allow, scrubMode, sess, thr, emit)
+			out := scrubBody(string(body), vm, allow, scrubMode, sess, thr, emit)
 			resp.Body = io.NopCloser(strings.NewReader(out))
 			resp.ContentLength = int64(len(out))
 			resp.Header.Del("Content-Length")
@@ -92,21 +95,21 @@ func ServeHTTP(addr, upstream string, st *vault.Store, p *policy.Policy, l *audi
 	return srv, nil
 }
 
-func scrubBody(body string, vaultVals map[string]string, allow map[string]bool, mode string, sess *scrubber.Session, thr float64, emit func(string, map[string]any)) string {
+func scrubBody(body string, m vault.Matcher, allow map[string]bool, mode string, sess *scrubber.Session, thr float64, emit func(string, map[string]any)) string {
 	var buf bytes.Buffer
 	sc := bufio.NewScanner(strings.NewReader(body))
 	sc.Buffer(make([]byte, 1024*1024), 1024*1024)
 	for sc.Scan() {
 		line := sc.Text()
 		payload := strings.TrimPrefix(line, "data: ")
-		scrubbed := scrubLine(payload, vaultVals, allow, mode, sess, thr, emit)
+		scrubbed := scrubLine(payload, m, allow, mode, sess, thr, emit)
 		if scrubbed != payload {
 			line = strings.Replace(line, payload, scrubbed, 1)
 		}
 		buf.WriteString(line + "\n")
 	}
 	if buf.Len() == 0 {
-		return scrubLine(body, vaultVals, allow, mode, sess, thr, emit)
+		return scrubLine(body, m, allow, mode, sess, thr, emit)
 	}
 	return buf.String()
 }

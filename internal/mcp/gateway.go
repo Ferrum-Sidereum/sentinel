@@ -136,15 +136,18 @@ func runInner(args []string, mode string, st *vault.Store, p *policy.Policy, l *
 				writeErr(os.Stdout, bad)
 				continue
 			}
-		// de-tokenize aliases in args
-		line = sess.Rehydrate(line)
-		stdin.Write([]byte(line + "\n"))
+			// de-tokenize aliases in args
+			line = sess.Rehydrate(line)
+			stdin.Write([]byte(line + "\n"))
 		}
 	}()
 	// server -> LLM direction: scrub text fields; L0 vault-match always on
-	var vv map[string]string
+	var vm vault.Matcher
 	if st != nil {
-		vv = st.ValuesSnapshot()
+		if m, err := st.NewMatcher(); err == nil {
+			vm = m
+			defer m.Close()
+		}
 	}
 	br := bufio.NewReader(stdout)
 	for {
@@ -152,7 +155,7 @@ func runInner(args []string, mode string, st *vault.Store, p *policy.Policy, l *
 		if err != nil {
 			break
 		}
-		line = scrubLine(line, vv, allow, scrubMode, sess, thr, emit)
+		line = scrubLine(line, vm, allow, scrubMode, sess, thr, emit)
 		os.Stdout.Write([]byte(line + "\n"))
 	}
 	c.Wait()
@@ -200,28 +203,28 @@ func checkCall(line string, deny map[string]bool) string {
 	return ""
 }
 
-func scrubLine(line string, vaultVals map[string]string, allow map[string]bool, mode string, sess *scrubber.Session, thr float64, emit func(string, map[string]any)) string {
-	var m map[string]any
-	if err := json.Unmarshal([]byte(line), &m); err != nil {
+func scrubLine(line string, m vault.Matcher, allow map[string]bool, mode string, sess *scrubber.Session, thr float64, emit func(string, map[string]any)) string {
+	var mm map[string]any
+	if err := json.Unmarshal([]byte(line), &mm); err != nil {
 		return line
 	}
-	if !scrubVal(m, vaultVals, allow, mode, sess, thr, emit) {
+	if !scrubVal(mm, m, allow, mode, sess, thr, emit) {
 		return line
 	}
 	var buf strings.Builder
 	enc := json.NewEncoder(&buf)
 	enc.SetEscapeHTML(false)
-	_ = enc.Encode(m)
+	_ = enc.Encode(mm)
 	return strings.TrimRight(buf.String(), "\n")
 }
 
-func scrubVal(v any, vaultVals map[string]string, allow map[string]bool, mode string, sess *scrubber.Session, thr float64, emit func(string, map[string]any)) bool {
+func scrubVal(v any, m vault.Matcher, allow map[string]bool, mode string, sess *scrubber.Session, thr float64, emit func(string, map[string]any)) bool {
 	switch t := v.(type) {
 	case map[string]any:
 		hit := false
 		for k, x := range t {
 			if s, ok := x.(string); ok && (k == "text" || k == "content" || k == "description") {
-				f := scrubber.Scan(s, vaultVals, allow)
+				f := scrubber.ScanWithMatcher(s, m, allow, nil)
 				if len(f) == 0 {
 					continue
 				}
@@ -239,7 +242,7 @@ func scrubVal(v any, vaultVals map[string]string, allow map[string]bool, mode st
 					hit = true
 					emit("pii_redacted", map[string]any{"count": len(f)})
 				}
-			} else if scrubVal(x, vaultVals, allow, mode, sess, thr, emit) {
+			} else if scrubVal(x, m, allow, mode, sess, thr, emit) {
 				hit = true
 			}
 		}
@@ -247,7 +250,7 @@ func scrubVal(v any, vaultVals map[string]string, allow map[string]bool, mode st
 	case []any:
 		hit := false
 		for _, x := range t {
-			if scrubVal(x, vaultVals, allow, mode, sess, thr, emit) {
+			if scrubVal(x, m, allow, mode, sess, thr, emit) {
 				hit = true
 			}
 		}
@@ -255,7 +258,6 @@ func scrubVal(v any, vaultVals map[string]string, allow map[string]bool, mode st
 	}
 	return false
 }
-
 func hasVaultSecret(f []scrubber.Finding) bool {
 	for _, x := range f {
 		if strings.HasPrefix(x.Type, "SECRET") {

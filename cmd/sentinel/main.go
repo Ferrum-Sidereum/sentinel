@@ -242,19 +242,18 @@ func cmdScan(args []string) {
 	for _, v := range p.Allowlist.Values {
 		allow[v] = true
 	}
-	vvals := map[string]string{}
+	var vm vault.Matcher
 	if st, err := openStore(); err == nil {
-		for _, n := range mustList(st) {
-			if sec, err := st.Get(n); err == nil {
-				vvals[n] = string(sec.Value)
-			}
+		if m, err := st.NewMatcher(); err == nil {
+			vm = m
+			defer m.Close()
 		}
-		st.Close()
+		defer st.Close()
 	}
 	for _, m := range placeholder.Find(text) {
 		fmt.Println("PLACEHOLDER", m)
 	}
-	for _, f := range scrubber.Scan(text, vvals, allow) {
+	for _, f := range scrubber.ScanWithMatcher(text, vm, allow, nil) {
 		fmt.Printf("%s [%s conf=%.2f] %q\n", f.Type, f.Detector, f.Confidence, f.Value)
 	}
 }
