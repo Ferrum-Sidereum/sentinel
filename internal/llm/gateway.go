@@ -26,10 +26,14 @@ type Gateway struct {
 	ln       net.Listener
 }
 
-// VaultSnapshotter supplies name->plaintext for L0 vault-match. Always on.
-type VaultSnapshotter interface {
-	ValuesSnapshot() map[string]string
+// VaultMatcher supplies vault-value matches without exposing plaintext.
+// *vault.Store implements it via NewMatcher.
+type VaultMatcher interface {
+	NewMatcher() (scrubber.VaultMatcher, error)
 }
+
+// VaultSnapshotter is the legacy name kept for the Vault field type.
+type VaultSnapshotter = VaultMatcher
 
 func Serve(addr, upstream string, p *policy.Policy, l *audit.Logger) (*Gateway, error) {
 	ln, err := net.Listen("tcp", addr)
@@ -92,11 +96,13 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	blocked := false
 	for i, m := range raw.Messages {
 		start := time.Now()
-		var vv map[string]string
+		var vm scrubber.VaultMatcher
 		if g.Vault != nil {
-			vv = g.Vault.ValuesSnapshot()
+			if matcher, err := g.Vault.NewMatcher(); err == nil {
+				vm = matcher
+			}
 		}
-		f := scrubber.Scan(m.Content, vv, allow)
+		f := scrubber.ScanWithMatcher(m.Content, vm, allow, nil)
 		for _, x := range f {
 			Metrics.AddFinding(x.Type, 1)
 		}

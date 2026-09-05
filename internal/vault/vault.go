@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sync"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -28,6 +29,10 @@ type Secret struct {
 type Store struct {
 	db  *sql.DB
 	key []byte // master key (32B)
+	mMu      sync.Mutex
+	mCache   *matcher
+	mGen     uint64
+	cacheGen uint64
 }
 
 func Open(path string, masterKey []byte) (*Store, error) {
@@ -105,6 +110,9 @@ func (s *Store) Put(sec Secret) error {
 		version=excluded.version,created_at=excluded.created_at`,
 		sec.Name, ct, nonce, sec.Kind, join(sec.Hosts), join(sec.Paths),
 		join(sec.Methods), join(sec.InjectHdr), sec.Version, time.Now().UTC().Format(time.RFC3339))
+	if err == nil {
+		s.invalidateMatcher()
+	}
 	return err
 }
 
@@ -164,31 +172,33 @@ func (s *Store) List() ([]string, error) {
 
 func (s *Store) Delete(name string) error {
 	_, err := s.db.Exec(`DELETE FROM secrets WHERE name=?`, name)
+	if err == nil {
+		s.invalidateMatcher()
+	}
 	return err
 }
 
-func (s *Store) Close() error { return s.db.Close() }
+func (s *Store) Close() error {
+	s.invalidateMatcher()
+	return s.db.Close()
+}
 
-// ValuesSnapshot returns name->plaintext map for L0 vault-match scanning.
-// Caller must treat values as sensitive; each Secret.Value zeroed after copy.
-func (s *Store) ValuesSnapshot() map[string]string {
-	out := map[string]string{}
-	if s == nil {
-		return out
+func (s *Store) invalidateMatcher() {
+	s.mMu.Lock()
+	defer s.mMu.Unlock()
+	s.mGen++
+	if s.mCache != nil {
+		s.mCache.Close()
+		s.mCache = nil
 	}
-	names, err := s.List()
-	if err != nil {
-		return out
+}
+
+func zero(b []byte) {
+	for i := range b {
+		b[i] = 0
 	}
-	for _, n := range names {
-		sec, err := s.Get(n)
-		if err != nil {
-			continue
-		}
-		out[n] = string(sec.Value)
-		for i := range sec.Value {
-			sec.Value[i] = 0
-		}
-	}
-	return out
+}
+
+func isPlaceholder(v string) bool {
+	return len(v) > 6 && v[:6] == "snt://"
 }

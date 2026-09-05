@@ -332,14 +332,13 @@ func cmdScan(args []string) {
 	for _, v := range p.Allowlist.Values {
 		allow[v] = true
 	}
-	vvals := map[string]string{}
+	var vm vault.Matcher
 	if st, err := openStore(); err == nil {
-		for _, n := range mustList(st) {
-			if sec, err := st.Get(n); err == nil {
-				vvals[n] = string(sec.Value)
-			}
+		if m, err := st.NewMatcher(); err == nil {
+			vm = m
+			defer m.Close()
 		}
-		st.Close()
+		defer st.Close()
 	}
 	for _, m := range placeholder.Find(text) {
 		fmt.Println("PLACEHOLDER", m)
@@ -347,7 +346,7 @@ func cmdScan(args []string) {
 	if showValues {
 		fmt.Fprintln(os.Stderr, "WARNING: printing matched secret values to an interactive terminal")
 	}
-	for _, f := range scrubber.Scan(text, vvals, allow) {
+	for _, f := range scrubber.ScanWithMatcher(text, vm, allow, nil) {
 		line, col := lineCol(text, f.Span[0])
 		sum := sha256.Sum256([]byte(f.Value))
 		if showValues {

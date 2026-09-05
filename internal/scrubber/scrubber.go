@@ -208,7 +208,67 @@ func NewSession(ttl time.Duration) *Session {
 	return &Session{Map: map[string]string{}, Rev: map[string]string{}, TTL: time.Now().Add(ttl), ctr: map[string]int{}}
 }
 
+// VaultMatcher answers vault-value matches without exposing plaintext.
+// Implemented by vault.Matcher; declared here to avoid an import cycle.
+type VaultMatcher interface {
+	// FindAll returns matches with secret NAMES, never values.
+	FindAll(text string) []Match
+	Close()
+}
+
+// Match is a vault-secret occurrence: name only, never the value.
+type Match struct {
+	Name       string
+	Start, End int
+}
+
+// Scan is the legacy entry point without vault values: regex/entropy/names only.
 func Scan(text string, vaultVals map[string]string, allow map[string]bool) []Finding {
+	return ScanWithMatcher(text, mapShim(vaultVals), allow, nil)
+}
+
+// ScanCustom legacy form with vault-values map.
+func ScanCustom(text string, vaultVals map[string]string, allow map[string]bool, customs []CustomPattern) []Finding {
+	return ScanWithMatcher(text, mapShim(vaultVals), allow, customs)
+}
+
+type mapShim map[string]string
+
+func (m mapShim) FindAll(text string) []Match {
+	if len(m) == 0 {
+		return nil
+	}
+	var out []Match
+	for name, val := range m {
+		if val == "" || isPlaceholder(val) {
+			continue
+		}
+		for i := 0; i+len(val) <= len(text); {
+			j := indexOf(text[i:], val)
+			if j < 0 {
+				break
+			}
+			s := i + j
+			out = append(out, Match{Name: name, Start: s, End: s + len(val)})
+			i = s + len(val)
+		}
+	}
+	return out
+}
+
+func (m mapShim) Close() {}
+
+func indexOf(hay, needle string) int {
+	for i := 0; i+len(needle) <= len(hay); i++ {
+		if hay[i:i+len(needle)] == needle {
+			return i
+		}
+	}
+	return -1
+}
+
+// ScanWithMatcher is Scan plus an L0 vault-match pass from m.
+func ScanWithMatcher(text string, m VaultMatcher, allow map[string]bool, customs []CustomPattern) []Finding {
 	var out []Finding
 	for _, r := range rules() {
 		for _, loc := range r.re.FindAllStringIndex(text, -1) {
@@ -222,20 +282,15 @@ func Scan(text string, vaultVals map[string]string, allow map[string]bool) []Fin
 			out = append(out, Finding{Type: r.typ, Span: [2]int{loc[0], loc[1]}, Value: v, Confidence: r.conf, Detector: "regex"})
 		}
 	}
-	// L0 vault match (always on): real vault values in text are SECRET findings.
-	// Placeholder-looking values never match as secrets — they pass through.
-	for name, val := range vaultVals {
-		if val == "" || allow[val] || isPlaceholder(val) {
-			continue
-		}
-		for i := 0; ; {
-			j := strings.Index(text[i:], val)
-			if j < 0 {
-				break
+	// L0 vault match (always on when m != nil): names+offsets only.
+	// The matched value is sliced from text at Apply time, never stored.
+	if m != nil {
+		for _, mt := range m.FindAll(text) {
+			v := text[mt.Start:mt.End]
+			if allow[v] || isPlaceholder(v) {
+				continue
 			}
-			s := i + j
-			out = append(out, Finding{Type: "SECRET:" + name, Span: [2]int{s, s + len(val)}, Value: val, Confidence: 1.0, Detector: "vault"})
-			i = s + len(val)
+			out = append(out, Finding{Type: "SECRET:" + mt.Name, Span: [2]int{mt.Start, mt.End}, Value: v, Confidence: 1.0, Detector: "vault"})
 		}
 	}
 	// L2 entropy: threshold 4.0, window +-120, len>=16; high conf when secret word adjacent
@@ -257,12 +312,6 @@ func Scan(text string, vaultVals map[string]string, allow map[string]bool) []Fin
 	out = append(out, scanNames(text, allow)...)
 	// decode one level (base64 / url-encoded / multipart-ish) and scan decoded payloads
 	out = append(out, scanDecoded(text, allow)...)
-	return dedupe(out)
-}
-
-// ScanCustom applies caller-supplied L6 custom regexes from policy (custom_patterns) on top of Scan.
-func ScanCustom(text string, vaultVals map[string]string, allow map[string]bool, customs []CustomPattern) []Finding {
-	base := Scan(text, vaultVals, allow)
 	for _, c := range customs {
 		if c.Re == nil {
 			continue
@@ -272,14 +321,10 @@ func ScanCustom(text string, vaultVals map[string]string, allow map[string]bool,
 			if allow[v] {
 				continue
 			}
-			typ := c.Name
-			if typ == "" {
-				typ = "CUSTOM"
-			}
-			base = append(base, Finding{Type: typ, Span: [2]int{loc[0], loc[1]}, Value: v, Confidence: 0.9, Detector: "custom"})
+			out = append(out, Finding{Type: c.Name, Span: [2]int{loc[0], loc[1]}, Value: v, Confidence: 0.9, Detector: "custom"})
 		}
 	}
-	return dedupe(base)
+	return dedupe(out)
 }
 
 // CompileCustomPatterns compiles raw pattern strings; invalid ones are skipped.

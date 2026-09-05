@@ -205,20 +205,27 @@ func (s *Server) substitute(host string, req *http.Request, body []byte) (bool, 
 
 // scrubEcho replaces known real secret values in responses with placeholders.
 func (s *Server) scrubEcho(body []byte) []byte {
-	names, err := s.Store.List()
+	m, err := s.Store.NewMatcher()
 	if err != nil {
 		return body
 	}
-	for _, n := range names {
-		sec, err := s.Store.Get(n)
-		if err != nil || len(sec.Value) == 0 {
-			continue
-		}
-		if bytes.Contains(body, sec.Value) {
-			body = bytes.ReplaceAll(body, sec.Value, []byte(placeholder.Canonical(n)))
-			s.emit("pii_redacted", map[string]any{"type": "SECRET_ECHO", "count": 1})
-		}
-		zero(sec.Value)
+	defer m.Close()
+	type span struct {
+		s, e int
+		name string
+	}
+	var spans []span
+	for _, mt := range m.FindAll(string(body)) {
+		spans = append(spans, span{mt.Start, mt.End, mt.Name})
+	}
+	// replace from end to keep offsets valid
+	for i := len(spans) - 1; i >= 0; i-- {
+		sp := spans[i]
+		nb := append([]byte{}, body[:sp.s]...)
+		nb = append(nb, []byte(placeholder.Canonical(sp.name))...)
+		nb = append(nb, body[sp.e:]...)
+		body = nb
+		s.emit("pii_redacted", map[string]any{"type": "SECRET_ECHO", "count": 1})
 	}
 	return body
 }

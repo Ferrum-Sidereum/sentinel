@@ -219,18 +219,7 @@ func (a *App) DeleteSecret(name, confirmation string) ([]SecretInfo, error) {
 		return nil, errors.New("The secret could not be deleted.")
 	}
 	return secretInfos(st)
-}
-func (a *App) RevealSecret(name, confirmation string) (string, error) {
- if err := a.lock(); err != nil { return "", err }; defer a.mu.Unlock()
- if name == "" || confirmation != name { return "", errors.New("Type the exact stored name to confirm reveal.") }
- st, key, err := a.openStore()
- if err != nil { return "", err }; defer closeStore(st, key)
- sec, err := st.Get(name)
- if err != nil { return "", errors.New("That entry no longer exists. Refresh the vault.") }
- defer wipe(sec.Value)
- if l, err := audit.Open(filepath.Join(a.dir, "audit.jsonl")); err == nil && l != nil { l.Log("", "secret_revealed", map[string]any{"name": name}); l.Close() }
- out := append([]byte(nil), sec.Value...)
- return string(out), nil
+
 }
 func (a *App) Scan(text string) (result ScanResult, err error) {
 	if err = a.lock(); err != nil {
@@ -277,7 +266,7 @@ func (a *App) Scan(text string) (result ScanResult, err error) {
 		allow[v] = true
 	}
 	start := time.Now()
-	findings := scrubber.ScanCustom(text, values, allow, scrubber.CompileCustomPatterns(p.CustomPatterns))
+	findings := scrubber.ScanWithMatcher(text, matcher, allow, scrubber.CompileCustomPatterns(p.CustomPatterns))
 	result = ScanResult{Findings: make([]FindingInfo, 0, len(findings)), Bytes: len(text)}
 	for _, f := range findings {
 		category := f.Type
