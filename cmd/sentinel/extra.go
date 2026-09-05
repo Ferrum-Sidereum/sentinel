@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"sentinel/internal/memguard"
 	"sentinel/internal/placeholder"
 	"sentinel/internal/vault"
 )
@@ -114,17 +115,33 @@ func cmdAudit(args []string) {
 	}
 }
 
-// sentinel rotate <name> : new value from stdin, version++
+// sentinel rotate <name> [--from-env NAME|--from-file PATH|--stdin] : new value, version++
 func cmdRotate(args []string) {
 	if len(args) < 1 {
-		fmt.Println("usage: sentinel rotate <name>")
+		fmt.Println("usage: sentinel rotate <name> [--from-env NAME|--from-file PATH|--stdin]")
 		os.Exit(2)
 	}
 	name := args[0]
-	r := bufio.NewReader(os.Stdin)
-	val, _ := r.ReadString('\n')
-	val = strings.TrimSpace(val)
-	if val == "" {
+	fromEnv, fromFile, fromStdin := "", "", false
+	for i := 1; i < len(args); i++ {
+		switch args[i] {
+		case "--from-env":
+			i++
+			fromEnv = args[i]
+		case "--from-file":
+			i++
+			fromFile = args[i]
+		case "--stdin":
+			fromStdin = true
+		}
+	}
+	val, err := readSecretValue(fromEnv, fromFile, fromStdin, "new value: ")
+	if err != nil {
+		fmt.Println(err)
+		os.Exit(1)
+	}
+	defer memguard.Zero(val)
+	if len(val) == 0 {
 		fmt.Println("empty value")
 		os.Exit(1)
 	}
@@ -139,7 +156,7 @@ func cmdRotate(args []string) {
 		fmt.Println(err)
 		os.Exit(1)
 	}
-	old.Value = []byte(val)
+	old.Value = append([]byte(nil), val...)
 	old.Version++
 	if err := st.Put(old); err != nil {
 		fmt.Println(err)

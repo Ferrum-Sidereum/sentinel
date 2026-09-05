@@ -2,17 +2,23 @@ package main
 
 import (
 	"bufio"
+	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 
 	"sentinel/internal/audit"
 	"sentinel/internal/keyring"
+	"sentinel/internal/memguard"
 	"sentinel/internal/placeholder"
 	"sentinel/internal/policy"
 	"sentinel/internal/scrubber"
+	"sentinel/internal/termsecret"
 	"sentinel/internal/vault"
 )
 
@@ -22,6 +28,9 @@ func dataDir() string {
 }
 
 func openStore() (*vault.Store, error) {
+	if err := os.MkdirAll(dataDir(), 0700); err != nil {
+		return nil, err
+	}
 	key, err := keyring.Load()
 	if err != nil {
 		if errors.Is(err, keyring.ErrUnavailable) {
@@ -118,11 +127,12 @@ func cmdInit() {
 
 func cmdAdd(args []string) {
 	if len(args) < 1 {
-		fmt.Println("usage: sentinel add <name> --bind host [--header H] [--kind bearer]")
+		fmt.Println("usage: sentinel add <name> --bind host [--header H] [--kind bearer] [--from-env NAME|--from-file PATH|--stdin]")
 		os.Exit(2)
 	}
 	name := args[0]
 	bind, header, kind := "", "", "bearer"
+	fromEnv, fromFile, fromStdin := "", "", false
 	for i := 1; i < len(args); i++ {
 		switch args[i] {
 		case "--bind":
@@ -134,23 +144,33 @@ func cmdAdd(args []string) {
 		case "--kind":
 			i++
 			kind = args[i]
+		case "--from-env":
+			i++
+			fromEnv = args[i]
+		case "--from-file":
+			i++
+			fromFile = args[i]
+		case "--stdin":
+			fromStdin = true
 		}
 	}
 	if bind == "" {
 		fmt.Println("bind host required")
 		os.Exit(2)
 	}
-	fmt.Print("value: ")
-	r := bufio.NewReader(os.Stdin)
-	val, _ := r.ReadString('\n')
-	val = strings.TrimSpace(val)
+	val, err := readSecretValue(fromEnv, fromFile, fromStdin, "value: ")
+	if err != nil {
+		fmt.Println(err)
+		os.Exit(1)
+	}
+	defer memguard.Zero(val)
 	st, err := openStore()
 	if err != nil {
 		fmt.Println(err)
 		os.Exit(1)
 	}
 	defer st.Close()
-	sec := vault.Secret{Name: name, Value: []byte(val), Kind: kind, Hosts: []string{bind}, Version: 1}
+	sec := vault.Secret{Name: name, Value: val, Kind: kind, Hosts: []string{bind}, Version: 1}
 	if header != "" {
 		sec.InjectHdr = []string{header}
 	}
@@ -163,6 +183,55 @@ func cmdAdd(args []string) {
 		l.Close()
 	}
 	fmt.Println("added", placeholder.Canonical(name), "|", placeholder.Safe(name))
+}
+
+// readSecretValue resolves the secret bytes from exactly one non-interactive
+// source or, when none is given, from no-echo terminal/pipe input.
+// Exactly one trailing newline is stripped; other whitespace is preserved.
+func readSecretValue(fromEnv, fromFile string, fromStdin bool, prompt string) ([]byte, error) {
+	n := 0
+	if fromEnv != "" {
+		n++
+	}
+	if fromFile != "" {
+		n++
+	}
+	if fromStdin {
+		n++
+	}
+	if n > 1 {
+		return nil, errors.New("use only one of --from-env, --from-file, --stdin")
+	}
+	if fromEnv != "" {
+		v, ok := os.LookupEnv(fromEnv)
+		if !ok || v == "" {
+			return nil, fmt.Errorf("env %s is not set or empty", fromEnv)
+		}
+		return []byte(v), nil
+	}
+	if fromFile != "" {
+		b, err := os.ReadFile(fromFile)
+		if err != nil {
+			return nil, err
+		}
+		b = bytes.TrimSuffix(bytes.TrimSuffix(b, []byte{'\n'}), []byte{'\r'})
+		if len(b) == 0 {
+			return nil, errors.New("empty value")
+		}
+		return b, nil
+	}
+	if fromStdin {
+		b, err := io.ReadAll(os.Stdin)
+		if err != nil {
+			return nil, err
+		}
+		b = bytes.TrimSuffix(bytes.TrimSuffix(b, []byte{'\n'}), []byte{'\r'})
+		if len(b) == 0 {
+			return nil, errors.New("empty value")
+		}
+		return b, nil
+	}
+	return termsecret.Read(prompt)
 }
 
 func cmdLs() {
@@ -225,9 +294,22 @@ func cmdEnv(args []string) {
 }
 
 func cmdScan(args []string) {
+	showValues := false
+	files := args[:0:0]
+	for _, a := range args {
+		if a == "--show-values" {
+			showValues = true
+			continue
+		}
+		files = append(files, a)
+	}
+	if showValues && !termsecret.IsTTY(os.Stdout) {
+		fmt.Fprintln(os.Stderr, "refusing --show-values on non-interactive output")
+		os.Exit(1)
+	}
 	var text string
-	if len(args) > 0 {
-		b, err := os.ReadFile(args[0])
+	if len(files) > 0 {
+		b, err := os.ReadFile(files[0])
 		if err != nil {
 			fmt.Println(err)
 			os.Exit(1)
@@ -262,9 +344,31 @@ func cmdScan(args []string) {
 	for _, m := range placeholder.Find(text) {
 		fmt.Println("PLACEHOLDER", m)
 	}
-	for _, f := range scrubber.Scan(text, vvals, allow) {
-		fmt.Printf("%s [%s conf=%.2f] %q\n", f.Type, f.Detector, f.Confidence, f.Value)
+	if showValues {
+		fmt.Fprintln(os.Stderr, "WARNING: printing matched secret values to an interactive terminal")
 	}
+	for _, f := range scrubber.Scan(text, vvals, allow) {
+		line, col := lineCol(text, f.Span[0])
+		sum := sha256.Sum256([]byte(f.Value))
+		if showValues {
+			fmt.Printf("%s [%s conf=%.2f] %d:%d fp=%s %q\n", f.Type, f.Detector, f.Confidence, line, col, hex.EncodeToString(sum[:])[:8], f.Value)
+			continue
+		}
+		fmt.Printf("%s [%s conf=%.2f] %d:%d fp=%s\n", f.Type, f.Detector, f.Confidence, line, col, hex.EncodeToString(sum[:])[:8])
+	}
+}
+
+func lineCol(text string, off int) (line, col int) {
+	line, col = 1, 1
+	for i := 0; i < off && i < len(text); i++ {
+		if text[i] == '\n' {
+			line++
+			col = 1
+			continue
+		}
+		col++
+	}
+	return line, col
 }
 
 func mustList(st *vault.Store) []string {
