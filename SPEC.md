@@ -123,11 +123,11 @@ Phases are strictly ordered. Do not start a phase while an earlier phase has an 
 
 | WP | Title | Status | Owner | PR |
 |:--|:--|:--|:--|:--|
-| WP-01 | Master key safety | not started | | |
+| WP-01 | Master key safety | done | multiagent s01 | |
 | WP-02 | Kill the plaintext passphrase | not started | | |
-| WP-03 | Never echo, never print | not started | | |
-| WP-04 | Scoped decryption, no plaintext snapshot | not started | | |
-| WP-05 | Toolchain and CI baseline | not started | | |
+| WP-03 | Never echo, never print | done | multiagent s03 | |
+| WP-04 | Scoped decryption, no plaintext snapshot | done | multiagent s04 | |
+| WP-05 | Toolchain and CI baseline | done | multiagent s05 | |
 | WP-06 | Vault schema v2 | not started | | |
 | WP-07 | Unify CLI and GUI on one core | not started | | |
 | WP-08 | Honest CLI surface | not started | | |
