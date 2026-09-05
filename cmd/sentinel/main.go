@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -21,8 +22,11 @@ func dataDir() string {
 }
 
 func openStore() (*vault.Store, error) {
-	key, err := keyring.LoadOrCreate()
+	key, err := keyring.Load()
 	if err != nil {
+		if errors.Is(err, keyring.ErrUnavailable) {
+			return nil, errors.New(keyring.Remediation)
+		}
 		return nil, err
 	}
 	return vault.Open(filepath.Join(dataDir(), "vault.db"), key)
@@ -82,22 +86,26 @@ func cmdInit() {
 	if _, err := os.Stat(def); os.IsNotExist(err) {
 		os.WriteFile(def, []byte("defaults:\n  unknown_host: tunnel\n  scrub_to_llm: pseudonymize\n  scrub_to_untrusted: mask\n  confidence_threshold: 0.7\naudit:\n  level: events\n  retention: 30d\n"), 0o600)
 	}
-	key, err := keyring.LoadOrCreate()
-	if err != nil {
-		fmt.Println("keychain unavailable, enter passphrase for fallback key (stored hashed via argon2id on first add):")
-		r := bufio.NewReader(os.Stdin)
-		pw, _ := r.ReadString('\n')
-		pw = strings.TrimSpace(pw)
-		if pw == "" {
-			fmt.Println("empty passphrase")
-			os.Exit(1)
-		}
-		os.WriteFile(filepath.Join(dir, "passphrase"), []byte(pw), 0o600)
-		key, err = keyring.LoadOrCreate()
+	key, err := keyring.Load()
+	switch {
+	case err == nil:
+		// key exists, proceed to open vault below
+	case errors.Is(err, keyring.ErrNotFound):
+		key, err = keyring.Create(dir)
 		if err != nil {
+			if errors.Is(err, keyring.ErrVaultExists) {
+				fmt.Println("init refused: vault data exists without a matching key; restore the key or remove the data dir")
+				os.Exit(1)
+			}
 			fmt.Println("init failed:", err)
 			os.Exit(1)
 		}
+	case errors.Is(err, keyring.ErrUnavailable):
+		fmt.Println(keyring.Remediation)
+		os.Exit(1)
+	default:
+		fmt.Println("init failed:", err)
+		os.Exit(1)
 	}
 	st, err := vault.Open(filepath.Join(dir, "vault.db"), key)
 	if err != nil {
