@@ -98,7 +98,7 @@ jobs:
             await expect(mode).toHaveValue('block');
             await page.getByRole('button', { name: 'Проверить изменения' }).click();
             await page.getByRole('button', { name: 'Подтвердить и сохранить' }).click();
-            await expect(page.getByRole('status')).toContainText('Политика сохранена');
+            await expect(page.getByRole('status').filter({ hasText: 'Политика сохранена' })).toBeVisible();
           });
           test('destructive secret action requires exact name; value is cleared on save', async ({ page }) => {
             await open(page);
