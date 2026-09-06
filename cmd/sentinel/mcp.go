@@ -14,17 +14,19 @@ import (
 )
 
 func cmdMCP(args []string) int {
-	fs := newFlagSet("mcp", "usage: sentinel mcp run [--mode inject|proxy] [--profile NAME] [--strict] [--yes-i-know] -- <cmd...>\n       sentinel mcp serve [listen-addr] [upstream-url]")
+	fs := newFlagSet("mcp", "usage: sentinel mcp run [--mode broker|inject|proxy] [--dest HOST]... [--allow-unbound] [--profile NAME] [--strict] [--yes-i-know] -- <cmd...>\n       sentinel mcp serve [listen-addr] [upstream-url]")
 	var mode, profile string
-	var strict, yesIKnow bool
-	fs.StringVar(&mode, "mode", mcp.ModeInject, "run mode: inject|proxy")
+	var strict, yesIKnow, allowUnbound bool
+	var dests multiFlag
+	fs.StringVar(&mode, "mode", mcp.ModeBroker, "run mode: broker|inject|proxy (broker default, inject explicit)")
 	fs.StringVar(&profile, "profile", "", "profile name")
+	fs.Var(&dests, "dest", "declared destination host (repeatable)")
+	fs.BoolVar(&allowUnbound, "allow-unbound", false, "allow wildcard/unbound injection (warns)")
 	fs.BoolVar(&strict, "strict", false, "denied approvals exit 4 instead of leaving snt:// placeholder")
 	fs.BoolVar(&yesIKnow, "yes-i-know", false, "auto-allow all approvals (demos/tests only, never default)")
 	if err := fs.Parse(args); err != nil {
 		return ExitUsage
 	}
-	_ = profile
 	rest := fs.Args()
 	if len(rest) < 1 || (rest[0] != "run" && rest[0] != "serve") {
 		return failUsage("sentinel mcp run ... | sentinel mcp serve ...")
@@ -39,8 +41,8 @@ func cmdMCP(args []string) int {
 	defer st.Close()
 	polPath := filepath.Join(dataDir(), "policy.yaml")
 	p, _ := policy.Load(polPath)
-	if mode != mcp.ModeInject && mode != mcp.ModeProxy {
-		return failUsage("invalid --mode (inject|proxy)")
+	if mode != mcp.ModeInject && mode != mcp.ModeProxy && mode != mcp.ModeBroker {
+		return failUsage("invalid --mode (broker|inject|proxy)")
 	}
 	mcp.Strict = strict
 	if yesIKnow {
@@ -48,7 +50,7 @@ func cmdMCP(args []string) int {
 		p.Approvals.Rules = nil
 	}
 	sess := scrubber.NewSession(24 * time.Hour)
-	if err := mcp.RunWithMode(rest, mode, st, &p, openAudit(), sess); err != nil {
+	if err := mcp.RunWithOptions(rest, mode, mcp.RunOptions{Dests: dests, AllowUnbound: allowUnbound}, st, &p, openAudit(), sess); err != nil {
 		return failRuntime(err)
 	}
 	return ExitOK
