@@ -128,20 +128,16 @@ Phases are strictly ordered. Do not start a phase while an earlier phase has an 
 | WP-06 | Vault schema v2 | done | multiagent s06 | |
 | WP-07 | Unify CLI and GUI on one core | not started | | |
 | WP-08 | Honest CLI surface | done | multiagent s08 | |
-| WP-09 | Port management and `status` | not started | | |
+| WP-09 | Port management and `status` | done | multiagent s09 | |
 | WP-10 | Approval broker | not started | | |
 | WP-11 | Injection modes | not started | | |
 | WP-12 | Profiles, for real | not started | | |
-| WP-13 | `scan` as a CI gate | not started | | |
-| WP-14 | `doctor` | not started | | |
-| WP-15 | Client config generator | not started | | |
+| WP-13 | `scan` as a CI gate | done | multiagent s13 | |
+| WP-14 | `doctor` | done | multiagent s14 | |
+| WP-15 | Client config generator | done | multiagent s15 | |
 | WP-16 | Release binaries | done | multiagent s16 | |
-| WP-17 | Tamper-evident audit + live tail | not started | | |
-| WP-18 | `policy test` | not started | | |
-| WP-19 | MCP protocol conformance | done | multiagent s19 | |
-
-## P0 — Stop the bleeding
-
+| WP-17 | Tamper-evident audit + live tail | done | multiagent s17 | |
+| WP-18 | `policy test` | done | multiagent s18 | |
 ### WP-01 — Master key safety
 
 **Fixes:** D1. **Files:** `internal/keyring/keyring.go`, `cmd/sentinel/main.go`.
