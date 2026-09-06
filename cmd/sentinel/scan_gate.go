@@ -252,10 +252,10 @@ type sarifTool struct {
 	Driver sarifDriver `json:"driver"`
 }
 type sarifDriver struct {
-	Name           string       `json:"name"`
-	Version        string       `json:"version"`
-	InformationURI string       `json:"informationUri"`
-	Rules          []sarifRule  `json:"rules"`
+	Name           string      `json:"name"`
+	Version        string      `json:"version"`
+	InformationURI string      `json:"informationUri"`
+	Rules          []sarifRule `json:"rules"`
 }
 type sarifRule struct {
 	ID               string `json:"id"`

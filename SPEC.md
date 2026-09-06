@@ -125,6 +125,9 @@ Phases are strictly ordered. Do not start a phase while an earlier phase has an 
 |:--|:--|:--|:--|:--|
 | WP-01 | Master key safety | done | multiagent s01 | |
 | WP-02 | Kill the plaintext passphrase | done | multiagent s02 | |
+| WP-03 | Never echo, never print | done | multiagent s03 | |
+| WP-04 | Scoped decryption, no plaintext snapshot | done | multiagent s04 | |
+| WP-05 | Toolchain and CI baseline | done | multiagent s05 | |
 | WP-06 | Vault schema v2 | done | multiagent s06 | |
 | WP-07 | Unify CLI and GUI on one core | done | multiagent s07 | |
 | WP-08 | Honest CLI surface | done | multiagent s08 | |

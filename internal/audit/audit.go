@@ -93,7 +93,7 @@ type Logger struct {
 
 type Option func(*Logger)
 
-func WithMaxSize(n int64) Option      { return func(l *Logger) { l.maxSize = n } }
+func WithMaxSize(n int64) Option        { return func(l *Logger) { l.maxSize = n } }
 func WithMaxAge(d time.Duration) Option { return func(l *Logger) { l.maxAge = d } }
 
 // Open opens (or creates) the log, recovering seq/prev_hash from tail.

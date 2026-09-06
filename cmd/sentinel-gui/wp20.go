@@ -77,11 +77,11 @@ type TrayState struct {
 
 // WizardStep is one idempotent onboarding step with its CLI equivalent.
 type WizardStep struct {
-	ID      string `json:"id"`
-	Title   string `json:"title"`
-	Done    bool   `json:"done"`
-	CLI     string `json:"cli"`
-	Detail  string `json:"detail"`
+	ID     string `json:"id"`
+	Title  string `json:"title"`
+	Done   bool   `json:"done"`
+	CLI    string `json:"cli"`
+	Detail string `json:"detail"`
 }
 
 // SecretMeta enriches the secret list without exposing values.

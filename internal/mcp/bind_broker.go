@@ -66,4 +66,3 @@ func brokerEnvFor(env []string, br broker.Broker, st *vault.Store, l *audit.Logg
 	out := append(append([]string{}, env...), BrokerEnv+"="+url)
 	return out, stop, nil
 }
-

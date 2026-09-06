@@ -72,9 +72,10 @@ func findCommand(name string) *command {
 }
 
 // JSON output shapes (stable, documented):
-//   ls:    {"secrets":[{"name":...,"placeholder":...,"safe":...}]}
-//   scan:  {"findings":[{"type":...,"detector":...,"confidence":...,"line":...,"col":...,"fp":...}],"placeholders":[...]} (+ "value" per finding only with --show-values on a TTY)
-//   audit: {"events":[<raw jsonl objects>]}
+//
+//	ls:    {"secrets":[{"name":...,"placeholder":...,"safe":...}]}
+//	scan:  {"findings":[{"type":...,"detector":...,"confidence":...,"line":...,"col":...,"fp":...}],"placeholders":[...]} (+ "value" per finding only with --show-values on a TTY)
+//	audit: {"events":[<raw jsonl objects>]}
 func emitJSON(v any) {
 	b, _ := json.Marshal(v)
 	fmt.Println(string(b))

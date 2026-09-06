@@ -92,12 +92,12 @@ func Init(dir string) error {
 
 // AddInput carries secret creation fields.
 type AddInput struct {
-	Name string
-	Value []byte
-	Kind string
-	Hosts []string
-	Paths []string
-	Methods []string
+	Name      string
+	Value     []byte
+	Kind      string
+	Hosts     []string
+	Paths     []string
+	Methods   []string
 	InjectHdr []string
 	ExpiresAt *time.Time
 }

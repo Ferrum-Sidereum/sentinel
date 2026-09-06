@@ -30,12 +30,12 @@ const maxPolicyBytes = 1 << 20
 // Only these exported App methods are bound. No shell, arbitrary-path,
 // network, secret-read or plaintext-export API is exposed.
 type App struct {
-	ctxMu sync.RWMutex
-	ctx context.Context
-	mu sync.Mutex
-	dir string
-	initErr error
-	keyLoad func() ([]byte, error)
+	ctxMu     sync.RWMutex
+	ctx       context.Context
+	mu        sync.Mutex
+	dir       string
+	initErr   error
+	keyLoad   func() ([]byte, error)
 	keyCreate func(dir string) ([]byte, error)
 }
 type SecretInfo struct {
@@ -73,6 +73,7 @@ type ScanResult struct {
 	ElapsedMS int64         `json:"elapsedMs"`
 	Bytes     int           `json:"bytes"`
 }
+
 func newApp() *App {
 	home, err := os.UserHomeDir()
 	a := &App{keyLoad: keyring.Load, keyCreate: keyring.Create}
@@ -257,6 +258,7 @@ func (a *App) DeleteSecret(name, confirmation string) ([]SecretInfo, error) {
 	return secretInfos(st)
 
 }
+
 // RevealSecret returns the plaintext only when confirmation matches the
 // stored name exactly; the reveal is audited without the value.
 func (a *App) RevealSecret(name, confirmation string) (string, error) {
