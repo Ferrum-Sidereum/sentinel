@@ -22,12 +22,38 @@ import (
  )
 
 // Mode controls secret handling in stdio run:
-//   - "inject": resolve snt:// placeholders in env to real values for child.
+//   - "inject": resolve snt:// placeholders in env to real values for child,
+//     gated by host-bind enforcement (see RunOptions).
 //   - "proxy": leave placeholders; child traffic must go via egress proxy.
+//   - "broker": leave placeholders in child env; child resolves each secret
+//     per call through a loopback endpoint (SENTINEL_BROKER_URL) that applies
+//     the broker gate. Documented default once it works; inject stays behind
+//     an explicit flag.
 const (
 	ModeInject = "inject"
 	ModeProxy  = "proxy"
+	ModeBroker = "broker"
 )
+
+// BindError is the named error for host-bind refusals in inject mode.
+type BindError struct {
+	Secret string
+	Dests  []string
+	Reason string
+}
+
+func (e *BindError) Error() string {
+	return fmt.Sprintf("mcp bind refused: secret %q dests %q: %s", e.Secret, e.Dests, e.Reason)
+}
+
+// RunOptions carries WP-11 bind-enforcement inputs for inject mode.
+// Dests: declared destinations, in order: --dest flag values, then the
+// profile's hosts list from policy (no such struct field exists yet, so the
+// profile contribution is currently empty); empty means deny.
+type RunOptions struct {
+	Dests        []string
+	AllowUnbound bool
+}
 
 // MaxFrameSize caps a single frame. 10 MiB frames are rejected, not buffered.
 const MaxFrameSize = 10 * 1024 * 1024
@@ -77,21 +103,55 @@ var SkipFields = map[string]bool{
 // (broker.ExitApprovalDenied) instead of leaving the placeholder.
 var Strict bool
 
-// RunWithMode is Run with explicit mode. Empty mode defaults to inject.
+// RunWithMode is Run with explicit mode. Empty mode defaults to broker (documented default); inject stays behind an explicit flag.
 func RunWithMode(args []string, mode string, st *vault.Store, p *policy.Policy, l *audit.Logger, sess *scrubber.Session) error {
+	return RunWithOptions(args, mode, RunOptions{}, st, p, l, sess)
+}
+
+// RunWithOptions is RunWithMode plus WP-11 bind-enforcement inputs.
+func RunWithOptions(args []string, mode string, opts RunOptions, st *vault.Store, p *policy.Policy, l *audit.Logger, sess *scrubber.Session) error {
 	if mode == "" {
-		mode = ModeInject
+		mode = ModeBroker
 	}
-	if mode != ModeInject && mode != ModeProxy {
-		return fmt.Errorf("invalid mode %q: want inject|proxy", mode)
+	if mode != ModeInject && mode != ModeProxy && mode != ModeBroker {
+		return fmt.Errorf("invalid mode %q: want inject|proxy|broker", mode)
 	}
-	return runInner(args, mode, st, p, l, sess)
+	return runInner(args, mode, opts, st, p, l, sess)
 }
 
 // Run wraps an MCP stdio server: resolves snt:// in env for child,
 // scrubs tool results to LLM, blocks foreign placeholders in tool args.
 func Run(args []string, st *vault.Store, p *policy.Policy, l *audit.Logger, sess *scrubber.Session) error {
-	return runInner(args, ModeInject, st, p, l, sess)
+	return runInner(args, ModeBroker, RunOptions{}, st, p, l, sess)
+}
+
+// bindCheck enforces WP-11: a host-bound secret is injected only if one of
+// the declared dests matches a binding. No declared dests => deny. A "*"
+// binding matches anything but requires AllowUnbound (and the caller warns).
+func bindCheck(secretHosts, dests []string, allowUnbound bool) error {
+	if len(secretHosts) == 0 {
+		if !allowUnbound {
+			return &BindError{Secret: "", Dests: dests, Reason: "secret has no host binding and no dest declared binding; pass --dest or --allow-unbound"}
+		}
+		return nil
+	}
+	for _, h := range secretHosts {
+		if h == "*" {
+			if !allowUnbound {
+				return &BindError{Secret: "", Dests: dests, Reason: "wildcard binding requires --allow-unbound"}
+			}
+			return nil
+		}
+		for _, d := range dests {
+			if strings.EqualFold(h, d) {
+				return nil
+			}
+		}
+	}
+	if len(dests) == 0 {
+		return &BindError{Secret: "", Dests: dests, Reason: "no declared dest: pass --dest or set profile hosts"}
+	}
+	return &BindError{Secret: "", Dests: dests, Reason: fmt.Sprintf("no declared dest matches binding %q", secretHosts)}
 }
 
 // vaultStore adapts *vault.Store to broker.SecretStore.
@@ -130,7 +190,7 @@ func defaultBrokerFor(p *policy.Policy, l *audit.Logger) broker.Broker {
 	return broker.NewPolicy(p.Approvals, emit)
  }
 
-func runInner(args []string, mode string, st *vault.Store, p *policy.Policy, l *audit.Logger, sess *scrubber.Session) error {
+func runInner(args []string, mode string, opts RunOptions, st *vault.Store, p *policy.Policy, l *audit.Logger, sess *scrubber.Session) error {
 	i := 0
 	for i < len(args) && args[i] != "--" {
 		i++
@@ -160,7 +220,6 @@ func runInner(args []string, mode string, st *vault.Store, p *policy.Policy, l *
 		allow[v] = true
 	}
 	deny := map[string]bool{}
-	_ = profile
 	if profile != "" {
 		for k := range p.Entities {
 			if strings.HasPrefix(k, "mcp:deny:") {
@@ -170,16 +229,17 @@ func runInner(args []string, mode string, st *vault.Store, p *policy.Policy, l *
 	}
 
 	env := os.Environ()
+	childFull := args[i]
+	child := childFull
+	if k := strings.LastIndex(child, "/"); k >= 0 {
+		child = child[k+1:]
+	}
+	if k := strings.LastIndex(child, "\\"); k >= 0 {
+		child = child[k+1:]
+	}
+	consumer := "mcp:" + profile + ":" + child
 	if mode == ModeInject {
 		br := defaultBrokerFor(p, l)
-		child := args[i]
-		if k := strings.LastIndex(child, "/"); k >= 0 {
-			child = child[k+1:]
-		}
-		if k := strings.LastIndex(child, "\\"); k >= 0 {
-			child = child[k+1:]
-		}
-		consumer := "mcp:" + profile + ":" + child
 		ctx := context.Background()
 		for idx, kv := range env {
 			if parts := strings.SplitN(kv, "=", 2); len(parts) == 2 {
@@ -188,6 +248,30 @@ func runInner(args []string, mode string, st *vault.Store, p *policy.Policy, l *
 				denied := false
 				for _, ph := range placeholder.Find(parts[1]) {
 					name := strings.TrimPrefix(ph, "snt://")
+					secMeta, merr := st.Get(name)
+					if merr != nil {
+						denied = true
+						continue
+					}
+					if berr := bindCheck(secMeta.Hosts, opts.Dests, opts.AllowUnbound); berr != nil {
+						if be, ok := berr.(*BindError); ok {
+							be.Secret = name
+						}
+						denied = true
+						if l != nil {
+							l.Log("", "injection_refused", map[string]any{"secret": name, "child": child, "dests": opts.Dests, "reason": berr.Error()})
+						}
+						if Strict {
+							return &ExitError{Err: berr, Code: broker.ExitApprovalDenied}
+						}
+						continue
+					}
+					for _, h := range secMeta.Hosts {
+						if h == "*" && opts.AllowUnbound {
+							fmt.Fprintln(os.Stderr, "warning: wildcard host binding allowed via --allow-unbound for secret "+name)
+							break
+						}
+					}
 					val, _, err := broker.Resolve(ctx, br, vaultStore{st}, broker.Request{
 						Secret: name, Consumer: consumer, Dest: child,
 						Reason:   "env injection",
@@ -200,6 +284,9 @@ func runInner(args []string, mode string, st *vault.Store, p *policy.Policy, l *
 					resolved = strings.ReplaceAll(resolved, ph, string(val))
 					zero(val)
 					changed = true
+					if l != nil {
+						l.Log("", "injection", map[string]any{"secret": name, "child": child, "dests": opts.Dests})
+					}
 				}
 				if denied && Strict {
 					return &ExitError{Err: fmt.Errorf("approval denied"), Code: broker.ExitApprovalDenied}
@@ -210,7 +297,16 @@ func runInner(args []string, mode string, st *vault.Store, p *policy.Policy, l *
 			}
 		}
 	}
-
+	if mode == ModeBroker {
+		br := defaultBrokerFor(p, l)
+		var stop func()
+		var berr error
+		env, stop, berr = brokerEnvFor(env, br, st, l, consumer)
+		if berr != nil {
+			return berr
+		}
+		defer stop()
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -309,9 +405,7 @@ func runInner(args []string, mode string, st *vault.Store, p *policy.Policy, l *
 		}
 	}()
 
-	// server -> LLM direction.
-	childFraming := FramingLine // child assumed line-framed stdio; respond to client in peer framing
-	_ = childFraming
+	// Child assumed line-framed stdio; respond to client in peer framing.
 	br := bufio.NewReader(stdout)
 	cbr := &frameReader{br: br, framing: FramingLine, detected: true}
 	done := make(chan struct{})
@@ -709,7 +803,9 @@ func scrubLine(line string, m vault.Matcher, allow map[string]bool, mode string,
 	var buf strings.Builder
 	enc := json.NewEncoder(&buf)
 	enc.SetEscapeHTML(false)
-	_ = enc.Encode(mm)
+	if err := enc.Encode(mm); err != nil {
+		return line
+	}
 	return strings.TrimRight(buf.String(), "\n")
 }
 
@@ -786,10 +882,9 @@ func hasVaultSecret(f []scrubber.Finding) bool {
 	}
 	return false
 }
-
 func writeErr(w *os.File, reason string) {
 	b, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": nil, "error": map[string]any{"code": -32602, "message": "sentinel: " + reason}})
-	w.Write(append(b, '\n'))
+	_, _ = w.Write(append(b, '\n'))
 }
 
 func zero(b []byte) {
