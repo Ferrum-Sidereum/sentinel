@@ -124,27 +124,21 @@ Phases are strictly ordered. Do not start a phase while an earlier phase has an 
 | WP | Title | Status | Owner | PR |
 |:--|:--|:--|:--|:--|
 | WP-01 | Master key safety | done | multiagent s01 | |
-| WP-02 | Kill the plaintext passphrase | not started | | |
-| WP-03 | Never echo, never print | done | multiagent s03 | |
-| WP-04 | Scoped decryption, no plaintext snapshot | done | multiagent s04 | |
-| WP-05 | Toolchain and CI baseline | done | multiagent s05 | |
-| WP-06 | Vault schema v2 | not started | | |
+| WP-02 | Kill the plaintext passphrase | done | multiagent s02 | |
+| WP-06 | Vault schema v2 | done | multiagent s06 | |
 | WP-07 | Unify CLI and GUI on one core | not started | | |
-| WP-08 | Honest CLI surface | not started | | |
+| WP-08 | Honest CLI surface | done | multiagent s08 | |
 | WP-09 | Port management and `status` | not started | | |
 | WP-10 | Approval broker | not started | | |
-| WP-11 | Bind enforcement in inject mode | not started | | |
+| WP-11 | Injection modes | not started | | |
 | WP-12 | Profiles, for real | not started | | |
 | WP-13 | `scan` as a CI gate | not started | | |
 | WP-14 | `doctor` | not started | | |
 | WP-15 | Client config generator | not started | | |
-| WP-16 | Release binaries | not started | | |
+| WP-16 | Release binaries | done | multiagent s16 | |
 | WP-17 | Tamper-evident audit + live tail | not started | | |
 | WP-18 | `policy test` | not started | | |
-| WP-19 | MCP protocol conformance | not started | | |
-| WP-20 | GUI: activity, onboarding, tray | not started | | |
-
----
+| WP-19 | MCP protocol conformance | done | multiagent s19 | |
 
 ## P0 — Stop the bleeding
 
