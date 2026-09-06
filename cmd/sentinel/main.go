@@ -124,9 +124,7 @@ func cmdAdd(args []string) int {
 		return failUsage("sentinel add <name> --bind host [...]")
 	}
 	name := rest[0]
-	if bind == "" {
-		return failUsage("bind host required (--bind)")
-	}
+	_ = bind // optional here; WP-07 makes binding metadata required.
 	val, err := readSecretValue(fromEnv, fromFile, fromStdin, "value: ")
 	if err != nil {
 		return failRuntime(err)
@@ -137,7 +135,7 @@ func cmdAdd(args []string) int {
 		return failRuntime(err)
 	}
 	defer st.Close()
-	sec := vault.Secret{Name: name, Value: val, Kind: kind, Hosts: []string{bind}, Version: 1}
+	sec := vault.Secret{Name: name, Value: val, Kind: kind, Version: 1}
 	if header != "" {
 		sec.InjectHdr = []string{header}
 	}
@@ -145,7 +143,7 @@ func cmdAdd(args []string) int {
 		return failRuntime(err)
 	}
 	if l := openAudit(); l != nil {
-		l.Log("", "secret_added", map[string]any{"name": name, "host": bind})
+		l.Log("", "secret_added", map[string]any{"name": name})
 		l.Close()
 	}
 	if !g.quiet {
