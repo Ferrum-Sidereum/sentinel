@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"regexp"
 	"sentinel/internal/audit"
+	"sentinel/internal/core"
+	"sentinel/internal/keyring"
 	"sentinel/internal/placeholder"
 	"sentinel/internal/policy"
 	"sentinel/internal/scrubber"
@@ -28,12 +30,13 @@ const maxPolicyBytes = 1 << 20
 // Only these exported App methods are bound. No shell, arbitrary-path,
 // network, secret-read or plaintext-export API is exposed.
 type App struct {
-	ctxMu       sync.RWMutex
-	ctx         context.Context
-	mu          sync.Mutex
-	dir         string
-	initErr     error
-	credentials credentialStore
+	ctxMu sync.RWMutex
+	ctx context.Context
+	mu sync.Mutex
+	dir string
+	initErr error
+	keyLoad func() ([]byte, error)
+	keyCreate func(dir string) ([]byte, error)
 }
 type SecretInfo struct {
 	Name        string `json:"name"`
@@ -70,10 +73,9 @@ type ScanResult struct {
 	ElapsedMS int64         `json:"elapsedMs"`
 	Bytes     int           `json:"bytes"`
 }
-
 func newApp() *App {
 	home, err := os.UserHomeDir()
-	a := &App{credentials: nativeCredentials{}}
+	a := &App{keyLoad: keyring.Load, keyCreate: keyring.Create}
 	if err != nil || home == "" {
 		a.initErr = errors.New("Your user profile directory is unavailable.")
 		return a
@@ -97,14 +99,33 @@ func (a *App) lock() error {
 	return nil
 }
 func (a *App) openStore() (*vault.Store, []byte, error) {
-	key, err := loadMasterKey(a.dir, a.credentials)
-	if err != nil {
-		return nil, nil, err
+	load := a.keyLoad
+	if load == nil {
+		load = keyring.Load
 	}
-	st, err := vault.Open(filepath.Join(a.dir, "vault.db"), key)
+	create := a.keyCreate
+	if create == nil {
+		create = keyring.Create
+	}
+	key, err := load()
+	if err != nil {
+		if !errors.Is(err, keyring.ErrNotFound) {
+			return nil, nil, errors.New("The credential store is unavailable. Unlock your session and retry.")
+		}
+		for _, name := range []string{"vault.db", "passphrase"} {
+			if _, se := os.Stat(filepath.Join(a.dir, name)); se == nil {
+				return nil, nil, errors.New("Existing Sentinel data has no matching credential. Restore the original key.")
+			}
+		}
+		key, err = create(a.dir)
+		if err != nil {
+			return nil, nil, errors.New("Cannot save the master key in the credential store.")
+		}
+	}
+	st, err := openVaultAt(a.dir, key)
 	if err != nil {
 		wipe(key)
-		return nil, nil, errors.New("Cannot open the existing vault. No credentials were replaced.")
+		return nil, nil, err
 	}
 	return st, key, nil
 }
@@ -156,16 +177,32 @@ func (a *App) Snapshot() (Snapshot, error) {
 var secretNameRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$`)
 
 func (a *App) AddSecret(name, value string) ([]SecretInfo, error) {
+	return a.AddSecretBound(name, value, "", nil, nil, nil)
+}
+
+// AddSecretBound creates a secret with CLI-equivalent binding metadata so the
+// egress proxy can resolve GUI-created entries for the bound host.
+func (a *App) AddSecretBound(name, value, hosts string, paths, methods, headers []string) ([]SecretInfo, error) {
 	if err := a.lock(); err != nil {
 		return nil, err
 	}
 	defer a.mu.Unlock()
-	name = strings.TrimSpace(name)
-	if !secretNameRE.MatchString(name) {
-		return nil, errors.New("Use 1-64 letters, digits, periods, underscores or hyphens for the name.")
+	canon, err := core.NormalizeName(name)
+	if err != nil {
+		return nil, errors.New("Use 1-64 letters, digits, hyphens or underscores for the name.")
 	}
 	if len(value) == 0 || len(value) > 16<<10 || !utf8.ValidString(value) {
 		return nil, errors.New("The secret must contain 1-16384 UTF-8 bytes.")
+	}
+	var bound []string
+	for _, h := range strings.Split(hosts, ",") {
+		h = strings.TrimSpace(h)
+		if h != "" {
+			bound = append(bound, h)
+		}
+	}
+	if len(bound) == 0 {
+		return nil, errors.New("At least one bound host is required so the proxy can resolve this secret.")
 	}
 	st, key, err := a.openStore()
 	if err != nil {
@@ -177,14 +214,13 @@ func (a *App) AddSecret(name, value string) ([]SecretInfo, error) {
 		return nil, err
 	}
 	for _, e := range entries {
-		if strings.EqualFold(strings.TrimPrefix(e.Name, "snt://"), name) {
+		if e.Name == canon {
 			return nil, errors.New("That name already exists. Existing values and binding metadata are never overwritten here.")
 		}
 	}
 	b := []byte(value)
 	defer wipe(b)
-	// Preserve the legacy Win32 companion's canonical-name convention.
-	if err := st.Put(vault.Secret{Name: placeholder.Canonical(name), Value: b}); err != nil {
+	if err := core.Add(st, core.AddInput{Name: canon, Value: b, Kind: "bearer", Hosts: bound, Paths: paths, Methods: methods, InjectHdr: headers}); err != nil {
 		return nil, errors.New("The secret could not be saved.")
 	}
 	return secretInfos(st)
@@ -221,6 +257,34 @@ func (a *App) DeleteSecret(name, confirmation string) ([]SecretInfo, error) {
 	return secretInfos(st)
 
 }
+// RevealSecret returns the plaintext only when confirmation matches the
+// stored name exactly; the reveal is audited without the value.
+func (a *App) RevealSecret(name, confirmation string) (string, error) {
+	if err := a.lock(); err != nil {
+		return "", err
+	}
+	defer a.mu.Unlock()
+	if name == "" || confirmation != name {
+		return "", errors.New("Type the exact stored name to confirm reveal.")
+	}
+	st, key, err := a.openStore()
+	if err != nil {
+		return "", err
+	}
+	defer closeStore(st, key)
+	sec, err := st.Get(name)
+	if err != nil {
+		return "", errors.New("That entry no longer exists. Refresh the vault.")
+	}
+	defer wipe(sec.Value)
+	if l, err := audit.Open(filepath.Join(a.dir, "audit.jsonl")); err == nil && l != nil {
+		l.Log("", "secret_revealed", map[string]any{"name": name})
+		l.Close()
+	}
+	out := make([]byte, len(sec.Value))
+	copy(out, sec.Value)
+	return string(out), nil
+}
 func (a *App) Scan(text string) (result ScanResult, err error) {
 	if err = a.lock(); err != nil {
 		return result, err
@@ -247,27 +311,17 @@ func (a *App) Scan(text string) (result ScanResult, err error) {
 		return result, err
 	}
 	defer closeStore(st, key)
-	names, err := st.List()
+	m, err := st.NewMatcher()
 	if err != nil {
-		return result, errors.New("Cannot read the vault. Scan cancelled.")
+		return result, errors.New("Cannot decrypt a vault entry. Scan cancelled.")
 	}
-	values := map[string]string{}
-	defer clear(values) // Managed strings may leave copies in RAM.
-	for _, n := range names {
-		sec, e := st.Get(n)
-		if e != nil {
-			return result, errors.New("Cannot decrypt a vault entry. Scan cancelled.")
-		}
-		values[n] = string(sec.Value)
-		wipe(sec.Value)
-	}
+	defer m.Close()
 	allow := map[string]bool{}
 	for _, v := range p.Allowlist.Values {
 		allow[v] = true
 	}
 	start := time.Now()
-	findings := scrubber.ScanWithMatcher(text, matcher, allow, scrubber.CompileCustomPatterns(p.CustomPatterns))
-	result = ScanResult{Findings: make([]FindingInfo, 0, len(findings)), Bytes: len(text)}
+	findings := scrubber.ScanWithMatcher(text, m, allow, scrubber.CompileCustomPatterns(p.CustomPatterns))
 	for _, f := range findings {
 		category := f.Type
 		if strings.HasPrefix(category, "SECRET") {

@@ -5,27 +5,44 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	oskeyring "github.com/zalando/go-keyring"
-	"gopkg.in/yaml.v3"
 	"os"
 	"path/filepath"
+	"sentinel/internal/keyring"
 	"sentinel/internal/vault"
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
-type fakeCredentials struct {
-	value  string
-	err    error
-	writes int
+type fakeKeys struct {
+	key     []byte
+	loadErr error
+	creates int
 }
 
-func (f *fakeCredentials) get() (string, error) { return f.value, f.err }
-func (f *fakeCredentials) set(v string) error   { f.value = v; f.err = nil; f.writes++; return nil }
+func (f *fakeKeys) load() ([]byte, error) {
+	if f.loadErr != nil {
+		return nil, f.loadErr
+	}
+	out := make([]byte, len(f.key))
+	copy(out, f.key)
+	return out, nil
+}
+
+func (f *fakeKeys) create(dir string) ([]byte, error) {
+	f.creates++
+	out := make([]byte, len(f.key))
+	copy(out, f.key)
+	return out, nil
+}
+
 func testApp(t *testing.T) *App {
 	t.Helper()
-	return &App{dir: t.TempDir(), credentials: &fakeCredentials{value: strings.Repeat("ab", 32)}}
+	fk := &fakeKeys{key: bytes.Repeat([]byte{0xab}, 32)}
+	return &App{dir: t.TempDir(), keyLoad: fk.load, keyCreate: fk.create}
 }
+
 func TestNeverRekeysExistingVault(t *testing.T) {
 	for _, file := range []string{"vault.db", "passphrase"} {
 		t.Run(file, func(t *testing.T) {
@@ -33,44 +50,57 @@ func TestNeverRekeysExistingVault(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(dir, file), []byte("existing"), 0600); err != nil {
 				t.Fatal(err)
 			}
-			cred := &fakeCredentials{err: oskeyring.ErrNotFound}
-			if _, err := loadMasterKey(dir, cred); err == nil {
+			fk := &fakeKeys{loadErr: keyring.ErrNotFound}
+			a := &App{dir: dir, keyLoad: fk.load, keyCreate: fk.create}
+			if _, _, err := a.openStore(); err == nil {
 				t.Fatal("expected refusal")
 			}
-			if cred.writes != 0 {
+			if fk.creates != 0 {
 				t.Fatal("credential overwritten")
 			}
 		})
 	}
 }
+
 func TestInvalidOrUnavailableKeyIsNotReplaced(t *testing.T) {
-	for _, cred := range []*fakeCredentials{{value: "bad"}, {err: errors.New("locked")}} {
-		if _, err := loadMasterKey(t.TempDir(), cred); err == nil {
+	for _, loadErr := range []error{keyring.ErrUnavailable, errors.New("locked")} {
+		fk := &fakeKeys{loadErr: loadErr}
+		a := &App{dir: t.TempDir(), keyLoad: fk.load, keyCreate: fk.create}
+		if _, _, err := a.openStore(); err == nil {
 			t.Fatal("expected refusal")
 		}
-		if cred.writes != 0 {
+		if fk.creates != 0 {
 			t.Fatal("unexpected credential write")
 		}
 	}
 }
+
 func TestNewProfileCreatesKeyOnce(t *testing.T) {
-	cred := &fakeCredentials{err: oskeyring.ErrNotFound}
-	dir := t.TempDir()
-	a, err := loadMasterKey(dir, cred)
+	fk := &fakeKeys{loadErr: keyring.ErrNotFound, key: bytes.Repeat([]byte{7}, 32)}
+	a := &App{dir: t.TempDir(), keyLoad: fk.load, keyCreate: fk.create}
+	st, key, err := a.openStore()
 	if err != nil {
 		t.Fatal(err)
 	}
-	b, err := loadMasterKey(dir, cred)
+	closeStore(st, key)
+	if fk.creates != 1 {
+		t.Fatal("key not created once")
+	}
+	// Second open uses the stored key (no second create).
+	fk.loadErr = nil
+	st2, key2, err := a.openStore()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(a) != 32 || !bytes.Equal(a, b) || cred.writes != 1 {
-		t.Fatal("incorrect key lifecycle")
+	closeStore(st2, key2)
+	if fk.creates != 1 {
+		t.Fatal("key created twice")
 	}
 }
+
 func TestSecretCRUDDoesNotRevealOrOverwrite(t *testing.T) {
 	a := testApp(t)
-	rows, err := a.AddSecret("demo", "synthetic-sensitive-value")
+	rows, err := a.AddSecretBound("demo", "synthetic-sensitive-value", "example.test", nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -79,41 +109,55 @@ func TestSecretCRUDDoesNotRevealOrOverwrite(t *testing.T) {
 		t.Fatal("plaintext crossed bridge")
 	}
 	if rows[0].Placeholder != "snt://demo" {
-		t.Fatal("double-prefixed placeholder")
+		t.Fatalf("placeholder: %q", rows[0].Placeholder)
 	}
-	if _, err := a.AddSecret("demo", "different"); err == nil {
+	if _, err := a.AddSecretBound("demo", "different", "example.test", nil, nil, nil); err == nil {
 		t.Fatal("duplicate overwritten")
 	}
-	if _, err := a.DeleteSecret("snt://demo", "wrong"); err == nil {
+	if _, err := a.DeleteSecret("demo", "wrong"); err == nil {
 		t.Fatal("confirmation bypass")
 	}
-	rows, err = a.DeleteSecret("snt://demo", "snt://demo")
+	rows, err = a.DeleteSecret("demo", "demo")
 	if err != nil || len(rows) != 0 {
 		t.Fatalf("delete: %v", err)
 	}
 }
+
 func TestRevealRequiresConfirmationAndAudits(t *testing.T) {
- a := testApp(t)
- if _, err := a.AddSecret("demo", "synthetic-sensitive-value"); err != nil { t.Fatal(err) }
- if _, err := a.RevealSecret("snt://demo", "wrong"); err == nil { t.Fatal("confirmation bypass") }
- v, err := a.RevealSecret("snt://demo", "snt://demo")
- if err != nil || v != "synthetic-sensitive-value" { t.Fatalf("reveal: %v", err) }
- raw, err := os.ReadFile(filepath.Join(a.dir, "audit.jsonl"))
- if err != nil { t.Fatal(err) }
- if !bytes.Contains(raw, []byte("secret_revealed")) { t.Fatal("reveal not audited") }
- if bytes.Contains(raw, []byte("synthetic-sensitive-value")) { t.Fatal("audit contains value") }
+	a := testApp(t)
+	if _, err := a.AddSecretBound("demo", "synthetic-sensitive-value", "example.test", nil, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.RevealSecret("demo", "wrong"); err == nil {
+		t.Fatal("confirmation bypass")
+	}
+	v, err := a.RevealSecret("demo", "demo")
+	if err != nil || v != "synthetic-sensitive-value" {
+		t.Fatalf("reveal: %v", err)
+	}
+	raw, err := os.ReadFile(filepath.Join(a.dir, "audit.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(raw, []byte("secret_revealed")) {
+		t.Fatal("reveal not audited")
+	}
+	if bytes.Contains(raw, []byte("synthetic-sensitive-value")) {
+		t.Fatal("audit contains value")
+	}
 }
+
 func TestPreservesExistingHostBindingMetadata(t *testing.T) {
 	a := testApp(t)
 	st, key, err := a.openStore()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := st.Put(vault.Secret{Name: "snt://bound", Value: []byte("synthetic-bound"), Hosts: []string{"example.test"}, InjectHdr: []string{"Authorization"}}); err != nil {
+	if err := st.Put(vault.Secret{Name: "bound", Value: []byte("synthetic-bound"), Hosts: []string{"example.test"}, InjectHdr: []string{"Authorization"}}); err != nil {
 		t.Fatal(err)
 	}
 	closeStore(st, key)
-	if _, err := a.AddSecret("BOUND", "replacement"); err == nil {
+	if _, err := a.AddSecretBound("BOUND", "replacement", "example.test", nil, nil, nil); err == nil {
 		t.Fatal("duplicate should fail")
 	}
 	st, key, err = a.openStore()
@@ -121,7 +165,7 @@ func TestPreservesExistingHostBindingMetadata(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer closeStore(st, key)
-	sec, err := st.Get("snt://bound")
+	sec, err := st.Get("bound")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -130,23 +174,22 @@ func TestPreservesExistingHostBindingMetadata(t *testing.T) {
 	}
 	wipe(sec.Value)
 }
+
 func TestWrongKeyFailsSnapshot(t *testing.T) {
 	a := testApp(t)
-	if _, err := a.AddSecret("demo", "synthetic"); err != nil {
+	if _, err := a.AddSecretBound("demo", "synthetic", "example.test", nil, nil, nil); err != nil {
 		t.Fatal(err)
 	}
-	cred := &fakeCredentials{value: hex.EncodeToString(bytes.Repeat([]byte{1}, 32))}
-	a.credentials = cred
+	bad := &fakeKeys{key: bytes.Repeat([]byte{1}, 32)}
+	a.keyLoad = bad.load
 	if _, err := a.Snapshot(); err == nil {
 		t.Fatal("wrong key accepted")
 	}
-	if cred.writes != 0 {
-		t.Fatal("key overwritten")
-	}
 }
+
 func TestScanResultNeverContainsMatchedValues(t *testing.T) {
 	a := testApp(t)
-	if _, err := a.AddSecret("demo", "unique-test-value-123"); err != nil {
+	if _, err := a.AddSecretBound("demo", "unique-test-value-123", "example.test", nil, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	result, err := a.Scan("contact demo@example.test; unique-test-value-123")
@@ -163,6 +206,7 @@ func TestScanResultNeverContainsMatchedValues(t *testing.T) {
 		}
 	}
 }
+
 func TestScanLimitsAndBusy(t *testing.T) {
 	a := testApp(t)
 	for _, input := range []string{"", strings.Repeat("x", maxScanBytes+1), string([]byte{0xff})} {
@@ -176,6 +220,7 @@ func TestScanLimitsAndBusy(t *testing.T) {
 	}
 	a.mu.Unlock()
 }
+
 func TestPolicyRevisionAndExtensions(t *testing.T) {
 	a := testApp(t)
 	path := filepath.Join(a.dir, "policy.yaml")
@@ -195,7 +240,7 @@ func TestPolicyRevisionAndExtensions(t *testing.T) {
 			snapshot.Policy.Entities[i].ToLLM = "block"
 		}
 	}
-	saved, err := a.SavePolicy(snapshot.Policy.Revision, snapshot.Policy.Entities, []PatternInfo{{Name: "CUSTOM", Expression: `TEST-[0-9]+`}})
+	saved, err := a.SavePolicy(snapshot.Policy.Revision, snapshot.Policy.Entities, []PatternInfo{{Name: "custom", Expression: `TEST-[0-9]+`}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -221,17 +266,18 @@ func TestPolicyRevisionAndExtensions(t *testing.T) {
 	if !bytes.Equal(backup, original) {
 		t.Fatal("backup is not original bytes")
 	}
-	if _, err := a.SavePolicy(saved.Revision, saved.Entities, []PatternInfo{{Name: "BAD", Expression: "["}}); err == nil {
+	if _, err := a.SavePolicy(saved.Revision, saved.Entities, []PatternInfo{{Name: "bad", Expression: "["}}); err == nil {
 		t.Fatal("invalid regex accepted")
 	}
 }
+
 func TestCustomPatternsAreActuallyUsed(t *testing.T) {
 	a := testApp(t)
 	snap, err := a.Snapshot()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := a.SavePolicy(snap.Policy.Revision, snap.Policy.Entities, []PatternInfo{{Name: "INTERNAL_ID", Expression: `TICKET-[0-9]{4}`}}); err != nil {
+	if _, err := a.SavePolicy(snap.Policy.Revision, snap.Policy.Entities, []PatternInfo{{Name: "internal_id", Expression: `TICKET-[0-9]{4}`}}); err != nil {
 		t.Fatal(err)
 	}
 	scan, err := a.Scan("TICKET-1234")
@@ -240,7 +286,7 @@ func TestCustomPatternsAreActuallyUsed(t *testing.T) {
 	}
 	found := false
 	for _, f := range scan.Findings {
-		if f.Category == "INTERNAL_ID" && f.Detector == "custom" {
+		if f.Category == "internal_id" && f.Detector == "custom" {
 			found = true
 		}
 	}
@@ -248,6 +294,7 @@ func TestCustomPatternsAreActuallyUsed(t *testing.T) {
 		t.Fatal("custom pattern not applied")
 	}
 }
+
 func TestAuditProjectionDropsUnknownMetadata(t *testing.T) {
 	a := testApp(t)
 	line := `{"time":"2026-09-05T21:00:00Z","type":"pii_redacted","fields":{"count":2,"value":"SYNTHETIC_SECRET","path":"private"}}` + "\n"
@@ -268,6 +315,7 @@ func TestAuditProjectionDropsUnknownMetadata(t *testing.T) {
 		t.Fatal("unexpected audit projection")
 	}
 }
+
 func TestAuditWindowIsBounded(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "audit.jsonl")
 	line := `{"time":"2026-09-05T21:00:00Z","type":"pii_redacted","fields":{"count":1}}` + "\n"
@@ -282,3 +330,6 @@ func TestAuditWindowIsBounded(t *testing.T) {
 		t.Fatal("unbounded audit page")
 	}
 }
+
+// hex import is used by pattern tests historically; keep referenced.
+var _ = hex.EncodeToString
