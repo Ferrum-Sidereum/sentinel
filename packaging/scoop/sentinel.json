@@ -1,0 +1,23 @@
+{
+  "version": "0.0.0",
+  "description": "Sentinel secret-hygiene CLI",
+  "homepage": "https://github.com/Ferrum-Sidereum/sentinel",
+  "license": "TBD",
+  "architecture": {
+    "64bit": {
+      "url": "https://github.com/Ferrum-Sidereum/sentinel/releases/download/v0.0.0/sentinel_0.0.0_windows_amd64.zip",
+      "hash": "REPLACE_WITH_RELEASE_SHA256"
+    }
+  },
+  "bin": "sentinel.exe",
+  "checkver": {
+    "github": "https://github.com/Ferrum-Sidereum/sentinel"
+  },
+  "autoupdate": {
+    "architecture": {
+      "64bit": {
+        "url": "https://github.com/Ferrum-Sidereum/sentinel/releases/download/v$version/sentinel_$version_windows_amd64.zip"
+      }
+    }
+  }
+}

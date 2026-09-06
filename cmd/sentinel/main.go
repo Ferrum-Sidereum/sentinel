@@ -76,6 +76,8 @@ func main() {
 		cmdMCP(os.Args[2:])
 	case "audit":
 		cmdAudit(os.Args[2:])
+	case "version":
+		cmdVersion()
 	case "rotate":
 		cmdRotate(os.Args[2:])
 	default:
@@ -85,7 +87,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Println(`sentinel init|add|ls|rm|env|scan`)
+	fmt.Println(`sentinel init|add|ls|rm|env|scan|version`)
 }
 
 func cmdInit() {
