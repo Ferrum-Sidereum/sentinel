@@ -32,6 +32,7 @@ var validDetectors = map[string]bool{
 var knownTopKeys = map[string]bool{
 	"defaults": true, "hosts": true, "entities": true,
 	"custom_patterns": true, "allowlist": true, "audit": true,
+	"approvals": true, "profiles": true,
 }
 
 // Lint validates a Policy: schema values, unknown top-level keys, unreachable

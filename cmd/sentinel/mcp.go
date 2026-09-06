@@ -24,8 +24,10 @@ func cmdMCP(args []string) int {
 	if err := fs.Parse(args); err != nil {
 		return ExitUsage
 	}
-	_ = profile
 	rest := fs.Args()
+	if profile != "" {
+		rest = append([]string{"--profile", profile}, rest...)
+	}
 	if len(rest) < 1 || (rest[0] != "run" && rest[0] != "serve") {
 		return failUsage("sentinel mcp run ... | sentinel mcp serve ...")
 	}
@@ -49,6 +51,9 @@ func cmdMCP(args []string) int {
 	}
 	sess := scrubber.NewSession(24 * time.Hour)
 	if err := mcp.RunWithMode(rest, mode, st, &p, openAudit(), sess); err != nil {
+		if policy.IsUnknownProfile(err) {
+			return failUsage(err.Error())
+		}
 		return failRuntime(err)
 	}
 	return ExitOK

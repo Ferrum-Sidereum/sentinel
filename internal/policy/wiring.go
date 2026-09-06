@@ -47,9 +47,16 @@ func init() {
 	RegisterWiring("approvals.rules", []string{"mcp"}, "first-match allow/deny/ask with glob secret/consumer in broker/policy.go")
 	RegisterWiring("approvals.grant_cache", []string{"mcp"}, "interactive session-grant TTL")
 	RegisterWiring("approvals.max_uses_per_minute", []string{"mcp"}, "rate limit in broker/policy.go")
+	RegisterWiring("profiles", []string{"mcp"}, "profile map in mcp/gateway.go via ResolveProfile")
+	RegisterWiring("profiles.*.secrets", nil, "parsed; secret scoping not yet enforced")
+	RegisterWiring("profiles.*.hosts", nil, "parsed; host scoping not yet enforced")
+	RegisterWiring("profiles.*.deny_tools", []string{"mcp"}, "deny set in mcp/gateway.go checkInbound")
+	RegisterWiring("profiles.*.allow_tools", []string{"mcp"}, "allowlist mode in mcp/gateway.go checkInboundProfile")
+	RegisterWiring("profiles.*.scrub_to_llm", nil, "parsed; per-profile scrub mode not yet enforced")
+	RegisterWiring("profiles.*.approvals", nil, "parsed; per-profile approvals not yet enforced")
 }
 
- // AllFields is the closed set of policy fields explain knows about.
+// AllFields is the closed set of policy fields explain knows about.
 // Adding a Policy struct field/yaml key WITHOUT registering wiring here
 // (and in init above) fails TestExplainCoverage — by design.
 func AllFields() []string {

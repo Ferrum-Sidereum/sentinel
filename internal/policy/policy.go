@@ -19,6 +19,15 @@ type EntityRule struct {
 	Detector    []string `yaml:"detector"`
 }
 
+type Profile struct {
+	Secrets    []string `yaml:"secrets"`
+	Hosts      []string `yaml:"hosts"`
+	DenyTools  []string `yaml:"deny_tools"`
+	AllowTools []string `yaml:"allow_tools"`
+	ScrubToLLM string   `yaml:"scrub_to_llm"`
+	Approvals  string   `yaml:"approvals"`
+}
+
 type Policy struct {
 	Defaults struct {
 		UnknownHost         string  `yaml:"unknown_host"`
@@ -38,7 +47,96 @@ type Policy struct {
 		Level     string `yaml:"level"`
 		Retention string `yaml:"retention"`
 	} `yaml:"audit"`
-	Approvals Approvals `yaml:"approvals"`
+	Approvals Approvals          `yaml:"approvals"`
+	Profiles  map[string]Profile `yaml:"profiles"`
+}
+
+// ErrUnknownProfile is returned when --profile names a missing profile.
+// Callers map it to exit code 2.
+var ErrUnknownProfile = errUnknownProfile{}
+
+type errUnknownProfile struct{ Name string }
+
+func (e errUnknownProfile) Error() string { return "unknown profile: " + e.Name }
+
+// LegacyDenyTools returns entity keys mcp:deny:<tool> (deprecated, ignored).
+// IsUnknownProfile reports whether err is an unknown-profile error.
+func IsUnknownProfile(err error) bool {
+	if err == nil {
+		return false
+	}
+	var t errUnknownProfile
+	if err == ErrUnknownProfile {
+		return true
+	}
+	return asErrUnknown(err, &t)
+}
+
+func asErrUnknown(err error, t *errUnknownProfile) bool {
+	for err != nil {
+		if e, ok := err.(errUnknownProfile); ok {
+			*t = e
+			return true
+		}
+		u, ok := err.(interface{ Unwrap() error })
+		if !ok {
+			return false
+		}
+		err = u.Unwrap()
+	}
+	return false
+}
+func (p *Policy) LegacyDenyTools() []string {
+	var out []string
+	for k := range p.Entities {
+		if len(k) > len("mcp:deny:") && k[:len("mcp:deny:")] == "mcp:deny:" {
+			out = append(out, k[len("mcp:deny:"):])
+		}
+	}
+	return out
+}
+
+// ResolveProfile returns the deny set for profile name.
+// Empty name = built-in default (denies nothing). Unknown name = ErrUnknownProfile.
+// Note: allowlist mode is evaluated via ProfileAllows, not this map.
+func (p *Policy) ResolveProfile(name string) (map[string]bool, error) {
+	if name == "" {
+		return map[string]bool{}, nil
+	}
+	prof, ok := p.Profiles[name]
+	if !ok {
+		return nil, errUnknownProfile{Name: name}
+	}
+	deny := map[string]bool{}
+	for _, t := range prof.DenyTools {
+		deny[t] = true
+	}
+	return deny, nil
+}
+
+// ProfileAllows reports whether tool is permitted under profile name.
+func (p *Policy) ProfileAllows(name, tool string) (bool, error) {
+	if name == "" {
+		return true, nil
+	}
+	prof, ok := p.Profiles[name]
+	if !ok {
+		return false, errUnknownProfile{Name: name}
+	}
+	for _, t := range prof.DenyTools {
+		if t == tool {
+			return false, nil
+		}
+	}
+	if len(prof.AllowTools) > 0 {
+		for _, t := range prof.AllowTools {
+			if t == tool {
+				return true, nil
+			}
+		}
+		return false, nil
+	}
+	return true, nil
 }
 
 // ApprovalRule is one allow/deny/ask rule. Empty Secret/Consumer/Dest match
@@ -82,7 +180,7 @@ func (r ApprovalRule) TTLDuration() time.Duration {
 		return 0
 	}
 	return d
- }
+}
 
 func Default() Policy {
 	var p Policy

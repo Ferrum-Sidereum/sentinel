@@ -19,7 +19,7 @@ import (
 	"sentinel/internal/policy"
 	"sentinel/internal/scrubber"
 	"sentinel/internal/vault"
- )
+)
 
 // Mode controls secret handling in stdio run:
 //   - "inject": resolve snt:// placeholders in env to real values for child.
@@ -128,7 +128,7 @@ func defaultBrokerFor(p *policy.Policy, l *audit.Logger) broker.Broker {
 		return broker.NewInteractive(os.Stdin, os.Stderr, p.Approvals.GrantCacheDuration(), emit)
 	}
 	return broker.NewPolicy(p.Approvals, emit)
- }
+}
 
 func runInner(args []string, mode string, st *vault.Store, p *policy.Policy, l *audit.Logger, sess *scrubber.Session) error {
 	i := 0
@@ -159,14 +159,12 @@ func runInner(args []string, mode string, st *vault.Store, p *policy.Policy, l *
 	for _, v := range p.Allowlist.Values {
 		allow[v] = true
 	}
-	deny := map[string]bool{}
-	_ = profile
-	if profile != "" {
-		for k := range p.Entities {
-			if strings.HasPrefix(k, "mcp:deny:") {
-				deny[strings.TrimPrefix(k, "mcp:deny:")] = true
-			}
-		}
+	deny, err := p.ResolveProfile(profile)
+	if err != nil {
+		return err
+	}
+	if legacy := p.LegacyDenyTools(); len(legacy) > 0 {
+		fmt.Fprintf(os.Stderr, "warning: mcp:deny:* entity keys are deprecated, use profiles: deny_tools instead (%d found, ignored)\n", len(legacy))
 	}
 
 	env := os.Environ()
@@ -190,7 +188,7 @@ func runInner(args []string, mode string, st *vault.Store, p *policy.Policy, l *
 					name := strings.TrimPrefix(ph, "snt://")
 					val, _, err := broker.Resolve(ctx, br, vaultStore{st}, broker.Request{
 						Secret: name, Consumer: consumer, Dest: child,
-						Reason:   "env injection",
+						Reason:    "env injection",
 						Requested: time.Now(),
 					})
 					if err != nil || val == nil {
@@ -292,17 +290,12 @@ func runInner(args []string, mode string, st *vault.Store, p *policy.Policy, l *
 				lastID = id
 				idMu.Unlock()
 			}
-			if findings := checkInbound(line, deny); len(findings) > 0 {
+			if findings := checkInboundProfile(line, deny, p, profile); len(findings) > 0 {
 				emit("mcp_blocked", map[string]any{"reason": strings.Join(findings, "; ")})
 				writeErrID(extractID(line), strings.Join(findings, "; "))
 				continue
 			}
 			line = sess.Rehydrate(line)
-			select {
-			case <-ctx.Done():
-				return
-			default:
-			}
 			if _, err := io.WriteString(stdin, line+"\n"); err != nil {
 				return // broken pipe to child: stop without deadlock
 			}
@@ -634,6 +627,7 @@ func checkCall(line string, deny map[string]bool) string {
 func checkInbound(line string, deny map[string]bool) []string {
 	var m struct {
 		Method string `json:"method"`
+
 		Params struct {
 			Name      string         `json:"name"`
 			Arguments map[string]any `json:"arguments"`
@@ -694,6 +688,43 @@ func checkInbound(line string, deny map[string]bool) []string {
 		}
 	default:
 		return nil
+	}
+	return out
+}
+
+// profileAllower is implemented by *policy.Policy.
+type profileAllower interface {
+	ProfileAllows(string, string) (bool, error)
+}
+
+// checkInboundProfile wraps checkInbound with profile allowlist enforcement:
+// allow_tools non-empty means everything else is denied for tools/call.
+func checkInboundProfile(line string, deny map[string]bool, p profileAllower, profile string) []string {
+	out := checkInbound(line, deny)
+	if profile == "" || p == nil {
+		return out
+	}
+	var m struct {
+		Method string `json:"method"`
+		Params struct {
+			Name string `json:"name"`
+		} `json:"params"`
+	}
+	if err := json.Unmarshal([]byte(line), &m); err != nil {
+		return out
+	}
+	if m.Method == "tools/call" && m.Params.Name != "" {
+		if ok, _ := p.ProfileAllows(profile, m.Params.Name); !ok {
+			dup := false
+			for _, f := range out {
+				if f == "tool denied: "+m.Params.Name {
+					dup = true
+				}
+			}
+			if !dup {
+				out = append(out, "tool denied: "+m.Params.Name)
+			}
+		}
 	}
 	return out
 }
@@ -765,8 +796,6 @@ func scrubVal(v any, m vault.Matcher, allow map[string]bool, mode string, sess *
 					hit = true
 					emit("secret_blocked", map[string]any{"type": f[0].Type})
 				} else if out != s {
-					t[i] = out
-					hit = true
 					emit("pii_redacted", map[string]any{"count": len(f)})
 				}
 			} else if scrubVal(x, m, allow, mode, sess, thr, emit) {
@@ -787,8 +816,8 @@ func hasVaultSecret(f []scrubber.Finding) bool {
 	return false
 }
 
-func writeErr(w *os.File, reason string) {
-	b, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": nil, "error": map[string]any{"code": -32602, "message": "sentinel: " + reason}})
+func writeErr(w *os.File, id any, reason string) {
+	b, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": id, "error": map[string]any{"code": -32602, "message": "sentinel: " + reason}})
 	w.Write(append(b, '\n'))
 }
 
