@@ -22,9 +22,22 @@ import (
 	"sentinel/internal/vault"
 )
 
-func dataDir() string {
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".sentinel")
+func init() {
+	register(
+		command{"init", "initialize vault and policy", "sentinel init", cmdInit},
+		command{"add", "add a secret bound to a host", "sentinel add <name> --bind host [--header H] [--kind K] [--from-env E|--from-file P|--stdin]", cmdAdd},
+		command{"ls", "list secret names (never values)", "sentinel ls [--json]", cmdLs},
+		command{"rm", "remove a secret", "sentinel rm <name>", cmdRm},
+		command{"env", "import/export env-style secrets", "sentinel env import --bind host [--prefix P] [file] | sentinel env export", cmdEnv},
+		command{"scan", "scan text for secret leaks", "sentinel scan [--show-values] [--json] [file]", cmdScan},
+		command{"serve", "run egress proxy", "sentinel serve [--addr ADDR]", cmdServe},
+		command{"run", "run a command under the egress proxy", "sentinel run -- <cmd...>", cmdRun},
+		command{"trust-ca", "install local CA into user store", "sentinel trust-ca", cmdTrustCA},
+		command{"llm-serve", "run LLM gateway", "sentinel llm-serve [listen-addr] [upstream-base]", cmdLLMServe},
+		command{"mcp", "run MCP proxy", "sentinel mcp run ... | sentinel mcp serve ...", cmdMCP},
+		command{"audit", "show audit log tail", "sentinel audit [-n N] [--json]", cmdAudit},
+		command{"rotate", "rotate a secret value", "sentinel rotate <name> [--from-env E|--from-file P|--stdin]", cmdRotate},
+	)
 }
 
 func openStore() (*vault.Store, error) {
@@ -47,48 +60,17 @@ func openAudit() *audit.Logger {
 }
 
 func main() {
-	if len(os.Args) < 2 {
-		usage()
-		os.Exit(2)
-	}
-	switch os.Args[1] {
-	case "init":
-		cmdInit()
-	case "add":
-		cmdAdd(os.Args[2:])
-	case "ls":
-		cmdLs()
-	case "rm":
-		cmdRm(os.Args[2:])
-	case "env":
-		cmdEnv(os.Args[2:])
-	case "scan":
-		cmdScan(os.Args[2:])
-	case "serve":
-		cmdServe(os.Args[2:])
-	case "run":
-		cmdRun(os.Args[2:])
-	case "trust-ca":
-		cmdTrustCA()
-	case "llm-serve":
-		cmdLLMServe(os.Args[2:])
-	case "mcp":
-		cmdMCP(os.Args[2:])
-	case "audit":
-		cmdAudit(os.Args[2:])
-	case "rotate":
-		cmdRotate(os.Args[2:])
-	default:
-		usage()
-		os.Exit(2)
-	}
+	os.Exit(dispatch(os.Args[1:]))
 }
 
-func usage() {
-	fmt.Println(`sentinel init|add|ls|rm|env|scan`)
-}
-
-func cmdInit() {
+func cmdInit(args []string) int {
+	fs := newFlagSet("init", "usage: sentinel init")
+	if err := fs.Parse(args); err != nil {
+		return ExitUsage
+	}
+	if fs.NArg() != 0 {
+		return failUsage("init takes no arguments")
+	}
 	dir := dataDir()
 	os.MkdirAll(dir, 0o700)
 	def := filepath.Join(dir, "policy.yaml")
@@ -98,76 +80,61 @@ func cmdInit() {
 	key, err := keyring.Load()
 	switch {
 	case err == nil:
-		// key exists, proceed to open vault below
 	case errors.Is(err, keyring.ErrNotFound):
 		key, err = keyring.Create(dir)
 		if err != nil {
 			if errors.Is(err, keyring.ErrVaultExists) {
-				fmt.Println("init refused: vault data exists without a matching key; restore the key or remove the data dir")
-				os.Exit(1)
+				fmt.Fprintln(os.Stderr, "init refused: vault data exists without a matching key; restore the key or remove the data dir")
+				return ExitRuntime
 			}
-			fmt.Println("init failed:", err)
-			os.Exit(1)
+			return failRuntime(fmt.Errorf("init failed: %w", err))
 		}
 	case errors.Is(err, keyring.ErrUnavailable):
-		fmt.Println(keyring.Remediation)
-		os.Exit(1)
+		fmt.Fprintln(os.Stderr, keyring.Remediation)
+		return ExitRuntime
 	default:
-		fmt.Println("init failed:", err)
-		os.Exit(1)
+		return failRuntime(fmt.Errorf("init failed: %w", err))
 	}
 	st, err := vault.Open(filepath.Join(dir, "vault.db"), key)
 	if err != nil {
-		fmt.Println("init failed:", err)
-		os.Exit(1)
+		return failRuntime(fmt.Errorf("init failed: %w", err))
 	}
 	st.Close()
-	fmt.Println("initialized", dir)
+	if !g.quiet {
+		fmt.Println("initialized", dir)
+	}
+	return ExitOK
 }
 
-func cmdAdd(args []string) {
-	if len(args) < 1 {
-		fmt.Println("usage: sentinel add <name> --bind host [--header H] [--kind bearer] [--from-env NAME|--from-file PATH|--stdin]")
-		os.Exit(2)
+func cmdAdd(args []string) int {
+	fs := newFlagSet("add", "usage: sentinel add <name> --bind host [--header H] [--kind K] [--from-env NAME|--from-file PATH|--stdin]")
+	var bind, header, kind, fromEnv, fromFile string
+	var fromStdin bool
+	fs.StringVar(&bind, "bind", "", "host to bind the secret to")
+	fs.StringVar(&header, "header", "", "injection header")
+	fs.StringVar(&kind, "kind", "bearer", "secret kind")
+	fs.StringVar(&fromEnv, "from-env", "", "read value from env var")
+	fs.StringVar(&fromFile, "from-file", "", "read value from file")
+	fs.BoolVar(&fromStdin, "stdin", false, "read value from stdin")
+	if err := fs.Parse(args); err != nil {
+		return ExitUsage
 	}
-	name := args[0]
-	bind, header, kind := "", "", "bearer"
-	fromEnv, fromFile, fromStdin := "", "", false
-	for i := 1; i < len(args); i++ {
-		switch args[i] {
-		case "--bind":
-			i++
-			bind = args[i]
-		case "--header":
-			i++
-			header = args[i]
-		case "--kind":
-			i++
-			kind = args[i]
-		case "--from-env":
-			i++
-			fromEnv = args[i]
-		case "--from-file":
-			i++
-			fromFile = args[i]
-		case "--stdin":
-			fromStdin = true
-		}
+	rest := fs.Args()
+	if len(rest) < 1 {
+		return failUsage("sentinel add <name> --bind host [...]")
 	}
+	name := rest[0]
 	if bind == "" {
-		fmt.Println("bind host required")
-		os.Exit(2)
+		return failUsage("bind host required (--bind)")
 	}
 	val, err := readSecretValue(fromEnv, fromFile, fromStdin, "value: ")
 	if err != nil {
-		fmt.Println(err)
-		os.Exit(1)
+		return failRuntime(err)
 	}
 	defer memguard.Zero(val)
 	st, err := openStore()
 	if err != nil {
-		fmt.Println(err)
-		os.Exit(1)
+		return failRuntime(err)
 	}
 	defer st.Close()
 	sec := vault.Secret{Name: name, Value: val, Kind: kind, Hosts: []string{bind}, Version: 1}
@@ -175,14 +142,16 @@ func cmdAdd(args []string) {
 		sec.InjectHdr = []string{header}
 	}
 	if err := st.Put(sec); err != nil {
-		fmt.Println(err)
-		os.Exit(1)
+		return failRuntime(err)
 	}
 	if l := openAudit(); l != nil {
 		l.Log("", "secret_added", map[string]any{"name": name, "host": bind})
 		l.Close()
 	}
-	fmt.Println("added", placeholder.Canonical(name), "|", placeholder.Safe(name))
+	if !g.quiet {
+		fmt.Println("added", placeholder.Canonical(name), "|", placeholder.Safe(name))
+	}
+	return ExitOK
 }
 
 // readSecretValue resolves the secret bytes from exactly one non-interactive
@@ -234,85 +203,108 @@ func readSecretValue(fromEnv, fromFile string, fromStdin bool, prompt string) ([
 	return termsecret.Read(prompt)
 }
 
-func cmdLs() {
+func cmdLs(args []string) int {
+	fs := newFlagSet("ls", "usage: sentinel ls [--json]")
+	if err := fs.Parse(args); err != nil {
+		return ExitUsage
+	}
 	st, err := openStore()
 	if err != nil {
-		fmt.Println(err)
-		os.Exit(1)
+		return failRuntime(err)
 	}
 	defer st.Close()
 	names, err := st.List()
 	if err != nil {
-		fmt.Println(err)
-		os.Exit(1)
+		return failRuntime(err)
+	}
+	if g.json {
+		type entry struct {
+			Name        string `json:"name"`
+			Placeholder string `json:"placeholder"`
+			Safe        string `json:"safe"`
+		}
+		out := map[string]any{"secrets": []entry{}}
+		list := []entry{}
+		for _, n := range names {
+			list = append(list, entry{n, placeholder.Canonical(n), placeholder.Safe(n)})
+		}
+		out["secrets"] = list
+		emitJSON(out)
+		return ExitOK
 	}
 	for _, n := range names {
 		fmt.Println(n, placeholder.Canonical(n))
 	}
+	return ExitOK
 }
 
-func cmdRm(args []string) {
-	if len(args) < 1 {
-		fmt.Println("usage: sentinel rm <name>")
-		os.Exit(2)
+func cmdRm(args []string) int {
+	fs := newFlagSet("rm", "usage: sentinel rm <name>")
+	if err := fs.Parse(args); err != nil {
+		return ExitUsage
+	}
+	if fs.NArg() < 1 {
+		return failUsage("sentinel rm <name>")
 	}
 	st, err := openStore()
 	if err != nil {
-		fmt.Println(err)
-		os.Exit(1)
+		return failRuntime(err)
 	}
 	defer st.Close()
-	if err := st.Delete(args[0]); err != nil {
-		fmt.Println(err)
-		os.Exit(1)
+	if err := st.Delete(fs.Arg(0)); err != nil {
+		return failRuntime(err)
 	}
-	fmt.Println("removed", args[0])
+	if !g.quiet {
+		fmt.Println("removed", fs.Arg(0))
+	}
+	return ExitOK
 }
 
-func cmdEnv(args []string) {
-	if len(args) < 1 {
-		fmt.Println("usage: sentinel env import|export ...")
-		os.Exit(2)
+func cmdEnv(args []string) int {
+	fs := newFlagSet("env", "usage: sentinel env import|export ...")
+	if err := fs.Parse(args); err != nil {
+		return ExitUsage
 	}
-	switch args[0] {
+	rest := fs.Args()
+	if len(rest) < 1 {
+		return failUsage("sentinel env import|export ...")
+	}
+	switch rest[0] {
 	case "export":
 		st, err := openStore()
 		if err != nil {
-			fmt.Println(err)
-			os.Exit(1)
+			return failRuntime(err)
 		}
 		defer st.Close()
 		names, _ := st.List()
 		for _, n := range names {
 			fmt.Printf("%s=%s\n", strings.ToUpper(n), placeholder.Canonical(n))
 		}
+		return ExitOK
 	case "import":
-		cmdEnvImport(args[1:])
+		return cmdEnvImport(rest[1:])
 	default:
-		fmt.Println("usage: sentinel env import|export ...")
+		return failUsage("sentinel env import|export ...")
 	}
 }
 
-func cmdScan(args []string) {
-	showValues := false
-	files := args[:0:0]
-	for _, a := range args {
-		if a == "--show-values" {
-			showValues = true
-			continue
-		}
-		files = append(files, a)
+func cmdScan(args []string) int {
+	fs := newFlagSet("scan", "usage: sentinel scan [--show-values] [--json] [file]")
+	var showValues bool
+	fs.BoolVar(&showValues, "show-values", false, "print matched values (TTY only)")
+	if err := fs.Parse(args); err != nil {
+		return ExitUsage
 	}
+	files := fs.Args()
 	if showValues && !termsecret.IsTTY(os.Stdout) {
 		fmt.Fprintln(os.Stderr, "refusing --show-values on non-interactive output")
-		os.Exit(1)
+		return ExitBlocked
 	}
 	var text string
 	if len(files) > 0 {
 		b, err := os.ReadFile(files[0])
 		if err != nil {
-			fmt.Println(err)
-			os.Exit(1)
+			return failRuntime(err)
 		}
 		text = string(b)
 	} else {
@@ -340,13 +332,44 @@ func cmdScan(args []string) {
 		}
 		defer st.Close()
 	}
+	placeholders := []string{}
 	for _, m := range placeholder.Find(text) {
+		placeholders = append(placeholders, m)
+	}
+	findings := scrubber.ScanWithMatcher(text, vm, allow, nil)
+	if g.json {
+		type finding struct {
+			Type       string  `json:"type"`
+			Detector   string  `json:"detector"`
+			Confidence float64 `json:"confidence"`
+			Line       int     `json:"line"`
+			Col        int     `json:"col"`
+			FP         string  `json:"fp"`
+			Value      string  `json:"value,omitempty"`
+		}
+		out := []finding{}
+		for _, f := range findings {
+			line, col := lineCol(text, f.Span[0])
+			sum := sha256.Sum256([]byte(f.Value))
+			fd := finding{f.Type, f.Detector, f.Confidence, line, col, hex.EncodeToString(sum[:])[:8], ""}
+			if showValues {
+				fd.Value = f.Value
+			}
+			out = append(out, fd)
+		}
+		emitJSON(map[string]any{"findings": out, "placeholders": placeholders})
+		if showValues {
+			fmt.Fprintln(os.Stderr, "WARNING: printing matched secret values to an interactive terminal")
+		}
+		return ExitOK
+	}
+	for _, m := range placeholders {
 		fmt.Println("PLACEHOLDER", m)
 	}
 	if showValues {
 		fmt.Fprintln(os.Stderr, "WARNING: printing matched secret values to an interactive terminal")
 	}
-	for _, f := range scrubber.ScanWithMatcher(text, vm, allow, nil) {
+	for _, f := range findings {
 		line, col := lineCol(text, f.Span[0])
 		sum := sha256.Sum256([]byte(f.Value))
 		if showValues {
@@ -355,6 +378,7 @@ func cmdScan(args []string) {
 		}
 		fmt.Printf("%s [%s conf=%.2f] %d:%d fp=%s\n", f.Type, f.Detector, f.Confidence, line, col, hex.EncodeToString(sum[:])[:8])
 	}
+	return ExitOK
 }
 
 func lineCol(text string, off int) (line, col int) {

@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -14,36 +15,26 @@ import (
 
 // sentinel env import --bind host [--prefix P] [file]
 // stdin or file with KEY=VALUE lines; values stored as secrets named lower(KEY).
-func cmdEnvImport(args []string) {
-	bind, prefix, file := "", "", ""
-	for i := 0; i < len(args); i++ {
-		switch args[i] {
-		case "--bind":
-			i++
-			if i < len(args) {
-				bind = args[i]
-			}
-		case "--prefix":
-			i++
-			if i < len(args) {
-				prefix = args[i]
-			}
-		default:
-			if !strings.HasPrefix(args[i], "--") {
-				file = args[i]
-			}
-		}
+func cmdEnvImport(args []string) int {
+	fs := newFlagSet("env import", "usage: sentinel env import --bind host [--prefix P] [file]")
+	var bind, prefix string
+	fs.StringVar(&bind, "bind", "", "host to bind imported secrets to")
+	fs.StringVar(&prefix, "prefix", "", "name prefix")
+	if err := fs.Parse(args); err != nil {
+		return ExitUsage
+	}
+	file := ""
+	if fs.NArg() > 0 {
+		file = fs.Arg(0)
 	}
 	if bind == "" {
-		fmt.Println("usage: sentinel env import --bind host [--prefix P] [file]")
-		os.Exit(2)
+		return failUsage("sentinel env import --bind host [--prefix P] [file]")
 	}
 	var lines []string
 	if file != "" {
 		b, err := os.ReadFile(file)
 		if err != nil {
-			fmt.Println(err)
-			os.Exit(1)
+			return failRuntime(err)
 		}
 		lines = strings.Split(string(b), "\n")
 	} else {
@@ -58,8 +49,7 @@ func cmdEnvImport(args []string) {
 	}
 	st, err := openStore()
 	if err != nil {
-		fmt.Println(err)
-		os.Exit(1)
+		return failRuntime(err)
 	}
 	defer st.Close()
 	n := 0
@@ -81,7 +71,6 @@ func cmdEnvImport(args []string) {
 			fmt.Println("skip", k, err)
 			continue
 		}
-		// print export mapping
 		fmt.Printf("%s=%s\n", k, placeholder.Canonical(name))
 		n++
 	}
@@ -90,81 +79,90 @@ func cmdEnvImport(args []string) {
 		l.Close()
 	}
 	fmt.Fprintf(os.Stderr, "imported %d\n", n)
+	return ExitOK
 }
 
 // sentinel audit [tail] [-n N]
-func cmdAudit(args []string) {
-	n := 20
-	for i := 0; i+1 < len(args); i++ {
-		if args[i] == "-n" {
-			fmt.Sscanf(args[i+1], "%d", &n)
-		}
+// JSON shape: {"events":[<raw objects>]}
+func cmdAudit(args []string) int {
+	fs := newFlagSet("audit", "usage: sentinel audit [-n N] [--json]")
+	var n int
+	fs.IntVar(&n, "n", 20, "tail lines")
+	if err := fs.Parse(args); err != nil {
+		return ExitUsage
 	}
 	p := filepath.Join(dataDir(), "audit.jsonl")
 	b, err := os.ReadFile(p)
 	if err != nil {
-		fmt.Println(err)
-		os.Exit(1)
+		return failRuntime(err)
 	}
 	lines := strings.Split(strings.TrimRight(string(b), "\n"), "\n")
 	if len(lines) > n {
 		lines = lines[len(lines)-n:]
 	}
+	if g.json {
+		events := []any{}
+		for _, l := range lines {
+			var v any
+			if err := json.Unmarshal([]byte(l), &v); err != nil {
+				events = append(events, l)
+				continue
+			}
+			events = append(events, v)
+		}
+		emitJSON(map[string]any{"events": events})
+		return ExitOK
+	}
 	for _, l := range lines {
 		fmt.Println(l)
 	}
+	return ExitOK
 }
 
 // sentinel rotate <name> [--from-env NAME|--from-file PATH|--stdin] : new value, version++
-func cmdRotate(args []string) {
-	if len(args) < 1 {
-		fmt.Println("usage: sentinel rotate <name> [--from-env NAME|--from-file PATH|--stdin]")
-		os.Exit(2)
+func cmdRotate(args []string) int {
+	fs := newFlagSet("rotate", "usage: sentinel rotate <name> [--from-env NAME|--from-file PATH|--stdin]")
+	var fromEnv, fromFile string
+	var fromStdin bool
+	fs.StringVar(&fromEnv, "from-env", "", "read value from env var")
+	fs.StringVar(&fromFile, "from-file", "", "read value from file")
+	fs.BoolVar(&fromStdin, "stdin", false, "read value from stdin")
+	if err := fs.Parse(args); err != nil {
+		return ExitUsage
 	}
-	name := args[0]
-	fromEnv, fromFile, fromStdin := "", "", false
-	for i := 1; i < len(args); i++ {
-		switch args[i] {
-		case "--from-env":
-			i++
-			fromEnv = args[i]
-		case "--from-file":
-			i++
-			fromFile = args[i]
-		case "--stdin":
-			fromStdin = true
-		}
+	if fs.NArg() < 1 {
+		return failUsage("sentinel rotate <name> [--from-env NAME|--from-file PATH|--stdin]")
 	}
+	name := fs.Arg(0)
 	val, err := readSecretValue(fromEnv, fromFile, fromStdin, "new value: ")
 	if err != nil {
-		fmt.Println(err)
-		os.Exit(1)
+		return failRuntime(err)
 	}
 	defer memguard.Zero(val)
 	if len(val) == 0 {
-		fmt.Println("empty value")
-		os.Exit(1)
+		fmt.Fprintln(os.Stderr, "empty value")
+		return ExitRuntime
 	}
 	st, err := openStore()
 	if err != nil {
-		fmt.Println(err)
-		os.Exit(1)
+		return failRuntime(err)
 	}
 	defer st.Close()
 	old, err := st.Get(name)
 	if err != nil {
-		fmt.Println(err)
-		os.Exit(1)
+		return failRuntime(err)
 	}
 	old.Value = append([]byte(nil), val...)
 	old.Version++
 	if err := st.Put(old); err != nil {
-		fmt.Println(err)
-		os.Exit(1)
+		return failRuntime(err)
 	}
 	if l := openAudit(); l != nil {
 		l.Log("", "secret_rotated", map[string]any{"name": name, "version": old.Version})
 		l.Close()
 	}
-	fmt.Println("rotated", name, "v", old.Version)
+	if !g.quiet {
+		fmt.Println("rotated", name, "v", old.Version)
+	}
+	return ExitOK
 }
