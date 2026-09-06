@@ -37,12 +37,31 @@ func init() {
 		command{"mcp", "run MCP proxy", "sentinel mcp run ... | sentinel mcp serve ...", cmdMCP},
 		command{"audit", "show audit log tail", "sentinel audit [-n N] [--json]", cmdAudit},
 		command{"rotate", "rotate a secret value", "sentinel rotate <name> [--from-env E|--from-file P|--stdin]", cmdRotate},
+		command{"migrate-key", "migrate legacy passphrase file to key.json KDF", "sentinel migrate-key", cmdMigrateKeyAdapter},
 	)
 }
 
 func openStore() (*vault.Store, error) {
-	if err := os.MkdirAll(dataDir(), 0700); err != nil {
+	dir := dataDir()
+	if err := os.MkdirAll(dir, 0700); err != nil {
 		return nil, err
+	}
+	if keyring.HasPassphrase(dir) {
+		pw, err := termsecret.Read("Enter passphrase: ")
+		if err != nil {
+			return nil, err
+		}
+		defer memguard.Zero(pw)
+		key, err := keyring.OpenPassphrase(dir, pw)
+		if err != nil {
+			return nil, err
+		}
+		defer memguard.Zero(key)
+		k := make([]byte, 32)
+		copy(k, key)
+		st, err := vault.Open(filepath.Join(dir, "vault.db"), k)
+		memguard.Zero(k)
+		return st, err
 	}
 	key, err := keyring.Load()
 	if err != nil {
@@ -63,8 +82,18 @@ func main() {
 	os.Exit(dispatch(os.Args[1:]))
 }
 
+func cmdMigrateKeyAdapter(args []string) int {
+	if len(args) != 0 {
+		return failUsage("migrate-key takes no arguments")
+	}
+	cmdMigrateKey()
+	return ExitOK
+}
+
 func cmdInit(args []string) int {
-	fs := newFlagSet("init", "usage: sentinel init")
+	fs := newFlagSet("init", "usage: sentinel init [--passphrase]")
+	var usePassphrase bool
+	fs.BoolVar(&usePassphrase, "passphrase", false, "use passphrase KDF instead of keychain")
 	if err := fs.Parse(args); err != nil {
 		return ExitUsage
 	}
@@ -76,6 +105,10 @@ func cmdInit(args []string) int {
 	def := filepath.Join(dir, "policy.yaml")
 	if _, err := os.Stat(def); os.IsNotExist(err) {
 		os.WriteFile(def, []byte("defaults:\n  unknown_host: tunnel\n  scrub_to_llm: pseudonymize\n  scrub_to_untrusted: mask\n  confidence_threshold: 0.7\naudit:\n  level: events\n  retention: 30d\n"), 0o600)
+	}
+	if usePassphrase {
+		cmdInitPassphrase(dir)
+		return ExitOK
 	}
 	key, err := keyring.Load()
 	switch {
@@ -119,7 +152,14 @@ func cmdAdd(args []string) int {
 	if err := fs.Parse(args); err != nil {
 		return ExitUsage
 	}
+	// Go's flag stops at the first positional arg, so a trailing
+	// "--bind" with no value lands in Args unparsed. Reject it as usage.
 	rest := fs.Args()
+	for _, r := range rest {
+		if r == "--bind" || r == "--header" || r == "--kind" || r == "--from-env" || r == "--from-file" {
+			return failUsage(fmt.Sprintf("flag %s requires a value", r))
+		}
+	}
 	if len(rest) < 1 {
 		return failUsage("sentinel add <name> --bind host [...]")
 	}
