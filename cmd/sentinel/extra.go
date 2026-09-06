@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"sentinel/internal/audit"
+	"sentinel/internal/core"
 	"sentinel/internal/memguard"
 	"sentinel/internal/placeholder"
 	"sentinel/internal/vault"
@@ -96,8 +97,11 @@ func cmdEnvImport(args []string) int {
 		if k == "" || v == "" {
 			continue
 		}
-		name := strings.ToLower(prefix + k)
-		name = strings.ReplaceAll(strings.ReplaceAll(name, "-", "_"), " ", "_")
+		name, err := core.NormalizeName(prefix + k)
+		if err != nil {
+			fmt.Println("skip", k, err)
+			continue
+		}
 		sec := vault.Secret{Name: name, Value: []byte(v), Kind: "bearer", Hosts: []string{bind}, Version: 1}
 		if err := st.Put(sec); err != nil {
 			fmt.Println("skip", k, err)
@@ -243,11 +247,11 @@ func cmdRotate(args []string) int {
 		return failRuntime(err)
 	}
 	defer st.Close()
-	old, err := st.Get(name)
+	old, err := core.Get(st, name)
 	if err != nil {
 		return failRuntime(err)
 	}
-	if err := st.Rotate(name, val, vault.DefaultKeepVersions); err != nil {
+	if err := core.Rotate(st, name, val, vault.DefaultKeepVersions); err != nil {
 		return failRuntime(err)
 	}
 	if l := openAudit(); l != nil {

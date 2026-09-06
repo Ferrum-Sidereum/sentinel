@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"sentinel/internal/audit"
+	"sentinel/internal/core"
 	"sentinel/internal/keyring"
 	"sentinel/internal/memguard"
 	"sentinel/internal/placeholder"
@@ -170,7 +171,10 @@ func cmdAdd(args []string) int {
 		return failUsage("sentinel add <name> --bind host [...]")
 	}
 	name := rest[0]
-	_ = bind // optional here; WP-07 makes binding metadata required.
+	hosts := []string{}
+	if bind != "" {
+		hosts = []string{bind}
+	}
 	val, err := readSecretValue(fromEnv, fromFile, fromStdin, "value: ")
 	if err != nil {
 		return failRuntime(err)
@@ -185,11 +189,11 @@ func cmdAdd(args []string) int {
 	if err != nil {
 		return failRuntime(err)
 	}
-	sec := vault.Secret{Name: name, Value: val, Kind: kind, Version: 1, ExpiresAt: exp}
+	var hdr []string
 	if header != "" {
-		sec.InjectHdr = []string{header}
+		hdr = []string{header}
 	}
-	if err := st.Put(sec); err != nil {
+	if err := core.Add(st, core.AddInput{Name: name, Value: val, Kind: kind, Hosts: hosts, InjectHdr: hdr, ExpiresAt: exp}); err != nil {
 		return failRuntime(err)
 	}
 	if l := openAudit(); l != nil {
@@ -261,7 +265,7 @@ func cmdLs(args []string) int {
 		return failRuntime(err)
 	}
 	defer st.Close()
-	names, err := st.List()
+	names, err := core.List(st)
 	if err != nil {
 		return failRuntime(err)
 	}
@@ -303,7 +307,7 @@ func cmdRm(args []string) int {
 		return failRuntime(err)
 	}
 	defer st.Close()
-	if err := st.Delete(fs.Arg(0)); err != nil {
+	if err := core.Remove(st, fs.Arg(0)); err != nil {
 		return failRuntime(err)
 	}
 	if !g.quiet {
