@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"sentinel/internal/audit"
 	"sentinel/internal/memguard"
 	"sentinel/internal/placeholder"
 	"sentinel/internal/vault"
@@ -113,39 +114,102 @@ func cmdEnvImport(args []string) int {
 	return ExitOK
 }
 
-// sentinel audit [tail] [-n N]
+// sentinel audit [tail] [-n N] | sentinel audit verify | sentinel audit tail [-f] [--since 1h] [--type T] [--secret NAME] [--json]
 // JSON shape: {"events":[<raw objects>]}
 func cmdAudit(args []string) int {
-	fs := newFlagSet("audit", "usage: sentinel audit [-n N] [--json]")
-	var n int
-	fs.IntVar(&n, "n", 20, "tail lines")
+	if len(args) > 0 && args[0] == "verify" {
+		return cmdAuditVerify(args[1:])
+	}
+	if len(args) > 0 && args[0] == "tail" {
+		return cmdAuditTail(args[1:])
+	}
+	return cmdAuditTail(args)
+}
+
+func cmdAuditVerify(args []string) int {
+	fs := newFlagSet("audit verify", "usage: sentinel audit verify")
 	if err := fs.Parse(args); err != nil {
 		return ExitUsage
 	}
 	p := filepath.Join(dataDir(), "audit.jsonl")
-	b, err := os.ReadFile(p)
+	if err := audit.Verify(p); err != nil {
+		fmt.Fprintln(os.Stderr, "verify:", err)
+		return ExitRuntime
+	}
+	if g.json {
+		emitJSON(map[string]any{"ok": true})
+		return ExitOK
+	}
+	fmt.Println("audit chain OK")
+	return ExitOK
+}
+
+func cmdAuditTail(args []string) int {
+	fs := newFlagSet("audit tail", "usage: sentinel audit [tail] [-n N] [-f] [--since 1h] [--type T] [--secret NAME] [--json]")
+	var n int
+	var follow bool
+	var sinceS, typF, secretF string
+	fs.IntVar(&n, "n", 20, "tail lines")
+	fs.BoolVar(&follow, "f", false, "follow new records")
+	fs.StringVar(&sinceS, "since", "", "only records newer than duration ago (e.g. 1h)")
+	fs.StringVar(&typF, "type", "", "filter by event type")
+	fs.StringVar(&secretF, "secret", "", "filter by secret name")
+	if err := fs.Parse(args); err != nil {
+		return ExitUsage
+	}
+	p := filepath.Join(dataDir(), "audit.jsonl")
+	files := audit.ChainFilesFor(p)
+	recs, err := audit.ReadAll(files)
 	if err != nil {
 		return failRuntime(err)
 	}
-	lines := strings.Split(strings.TrimRight(string(b), "\n"), "\n")
-	if len(lines) > n {
-		lines = lines[len(lines)-n:]
-	}
-	if g.json {
-		events := []any{}
-		for _, l := range lines {
-			var v any
-			if err := json.Unmarshal([]byte(l), &v); err != nil {
-				events = append(events, l)
-				continue
-			}
-			events = append(events, v)
+	var since time.Time
+	if sinceS != "" {
+		d, err := time.ParseDuration(sinceS)
+		if err != nil {
+			return failUsage("bad --since (try 1h, 30m)")
 		}
-		emitJSON(map[string]any{"events": events})
+		since = time.Now().Add(-d)
+	}
+	filtered := recs[:0:0]
+	for _, r := range recs {
+		ts, _ := time.Parse(time.RFC3339, r.Ts)
+		if !since.IsZero() && ts.Before(since) {
+			continue
+		}
+		if typF != "" && r.Type != typF {
+			continue
+		}
+		if secretF != "" && (r.Fields == nil || r.Fields["name"] != secretF) {
+			continue
+		}
+		filtered = append(filtered, r)
+	}
+	if len(filtered) > n {
+		filtered = filtered[len(filtered)-n:]
+	}
+	printRec := func(r audit.Record) {
+		if g.json {
+			b, _ := json.Marshal(r)
+			fmt.Println(string(b))
+			return
+		}
+		b, _ := json.Marshal(r)
+		fmt.Println(string(b))
+	}
+	if g.json && !follow {
+		emitJSON(map[string]any{"events": filtered})
 		return ExitOK
 	}
-	for _, l := range lines {
-		fmt.Println(l)
+	for _, r := range filtered {
+		printRec(r)
+	}
+	if follow {
+		var last uint64
+		if len(recs) > 0 {
+			last = recs[len(recs)-1].Seq
+		}
+		audit.TailPoll(files, last, since, typF, secretF, nil, printRec)
 	}
 	return ExitOK
 }
