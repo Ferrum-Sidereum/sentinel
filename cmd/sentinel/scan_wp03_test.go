@@ -59,8 +59,8 @@ func TestScanNeverPrintsValue(t *testing.T) {
 	scan.Stdin = strings.NewReader("leak zzz-known-marker-9f8e7d6c5b4a here")
 	scan.Env = env
 	out, err := scan.CombinedOutput()
-	if err != nil {
-		t.Fatalf("scan: %v %s", err, out)
+	if ee, ok := err.(*exec.ExitError); !ok || ee.ExitCode() != 3 {
+		t.Fatalf("scan dirty must exit 3: %v %s", err, out)
 	}
 	s := string(out)
 	if strings.Contains(s, "zzz-known-marker-9f8e7d6c5b4a") {
@@ -109,8 +109,8 @@ func TestPipedAddPreservesBytes(t *testing.T) {
 	scan.Stdin = strings.NewReader("x a=b c y")
 	scan.Env = env
 	out, err := scan.CombinedOutput()
-	if err != nil {
-		t.Fatalf("scan: %v %s", err, out)
+	if ee, ok := err.(*exec.ExitError); !ok || ee.ExitCode() != 3 {
+		t.Fatalf("scan dirty must exit 3: %v %s", err, out)
 	}
 	if strings.Contains(string(out), "a=b c") {
 		t.Fatalf("scan leaked value: %q", out)

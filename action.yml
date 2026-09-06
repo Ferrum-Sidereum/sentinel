@@ -1,0 +1,52 @@
+name: sentinel-scan
+description: Scan a checkout for secret leaks with sentinel (CI gate)
+inputs:
+  path:
+    description: File or directory to scan (default scans the whole checkout)
+    required: false
+    default: .
+  min-confidence:
+    description: Only gate on findings with confidence >= value
+    required: false
+    default: '0'
+  fail-on:
+    description: Comma-separated finding types that fail the gate (empty = all)
+    required: false
+    default: ''
+  version:
+    description: Sentinel release tag to install (e.g. v0.1.0)
+    required: false
+    default: v0
+runs:
+  using: composite
+  steps:
+    - name: Install sentinel
+      shell: bash
+      run: |
+        TAG="${{ inputs.version }}"
+        OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
+        ARCH="$(uname -m)"
+        case "$ARCH" in x86_64) ARCH=amd64 ;; aarch64|arm64) ARCH=arm64 ;; esac
+        URL="https://github.com/Ferrum-Sidereum/sentinel/releases/download/${TAG}/sentinel_${OS}_${ARCH}.tar.gz"
+        curl -fsSL "$URL" -o /tmp/sentinel.tar.gz
+        tar -xzf /tmp/sentinel.tar.gz -C /tmp
+        install /tmp/sentinel /usr/local/bin/sentinel
+    - name: Scan
+      shell: bash
+      run: |
+        ARGS="${{ inputs.path }}"
+        if [ "${{ inputs.min-confidence }}" != "0" ]; then
+          ARGS="$ARGS --min-confidence ${{ inputs.min-confidence }}"
+        fi
+        if [ -n "${{ inputs.fail-on }}" ]; then
+          ARGS="$ARGS --fail-on ${{ inputs.fail-on }}"
+        fi
+        # shellcheck disable=SC2086
+        sentinel scan --format sarif $ARGS | tee sentinel.sarif
+    - name: Upload SARIF
+      uses: github/codeql-action/upload-sarif@v3
+      with:
+        sarif_file: sentinel.sarif
+branding:
+  icon: shield
+  color: blue
