@@ -35,6 +35,7 @@ func init() {
 		command{"trust-ca", "install local CA into user store", "sentinel trust-ca", cmdTrustCA},
 		command{"llm-serve", "run LLM gateway", "sentinel llm-serve [listen-addr] [upstream-base]", cmdLLMServe},
 		command{"mcp", "run MCP proxy", "sentinel mcp run ... | sentinel mcp serve ...", cmdMCP},
+		command{"policy", "lint/test/explain/diff policy", "sentinel policy lint|test|explain|diff ...", cmdPolicy},
 		command{"audit", "show audit log tail", "sentinel audit [-n N] [--json]", cmdAudit},
 		command{"rotate", "rotate a secret value", "sentinel rotate <name> [--from-env E|--from-file P|--stdin]", cmdRotate},
 		command{"migrate-key", "migrate legacy passphrase file to key.json KDF", "sentinel migrate-key", cmdMigrateKeyAdapter},
