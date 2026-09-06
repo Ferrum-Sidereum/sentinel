@@ -2,12 +2,33 @@
   "mcpServers": {
     "github": {
       "command": "sentinel",
-      "args": ["mcp", "run", "--mode", "inject", "--profile", "github", "--", "npx", "-y", "@modelcontextprotocol/server-github"],
-      "env": { "GITHUB_TOKEN": "snt://github_pat" }
+      "args": [
+        "mcp",
+        "run",
+        "--mode",
+        "inject",
+        "--profile",
+        "github",
+        "--",
+        "npx",
+        "-y",
+        "@modelcontextprotocol/server-github"
+      ],
+      "env": {
+        "GITHUB_TOKEN": "snt://github_pat"
+      }
     },
     "proxy-mode-example": {
       "command": "sentinel",
-      "args": ["mcp", "run", "--mode", "proxy", "--", "node", "server.js"],
+      "args": [
+        "mcp",
+        "run",
+        "--mode",
+        "proxy",
+        "--",
+        "node",
+        "server.js"
+      ],
       "env": {
         "API_TOKEN": "snt://some_token",
         "HTTPS_PROXY": "http://127.0.0.1:18449"
