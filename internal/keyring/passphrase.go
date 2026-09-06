@@ -61,7 +61,8 @@ func DefaultParams() (time uint32, memKiB uint32, par uint8) {
 	return time, memKiB, par
 }
 func derive(passphrase, salt []byte, time, memKiB uint32, par uint8) []byte {
-	return argon2.IDKey(passphrase, salt, time, memKiB*1024, par, 32)
+	// argon2.IDKey takes memory in KiB already; do NOT scale.
+	return argon2.IDKey(passphrase, salt, time, memKiB, par, 32)
 }
 
 func sealVerifier(key []byte) (string, error) {
