@@ -38,6 +38,7 @@ func init() {
 		command{"audit", "show audit log tail", "sentinel audit [-n N] [--json]", cmdAudit},
 		command{"rotate", "rotate a secret value", "sentinel rotate <name> [--from-env E|--from-file P|--stdin]", cmdRotate},
 		command{"migrate-key", "migrate legacy passphrase file to key.json KDF", "sentinel migrate-key", cmdMigrateKeyAdapter},
+		command{"rollback", "restore previous secret version", "sentinel rollback <name>", cmdRollbackAdapter},
 	)
 }
 
@@ -141,23 +142,26 @@ func cmdInit(args []string) int {
 
 func cmdAdd(args []string) int {
 	fs := newFlagSet("add", "usage: sentinel add <name> --bind host [--header H] [--kind K] [--from-env NAME|--from-file PATH|--stdin]")
-	var bind, header, kind, fromEnv, fromFile string
+	var bind, header, kind, fromEnv, fromFile, expires string
 	var fromStdin bool
 	fs.StringVar(&bind, "bind", "", "host to bind the secret to")
 	fs.StringVar(&header, "header", "", "injection header")
 	fs.StringVar(&kind, "kind", "bearer", "secret kind")
 	fs.StringVar(&fromEnv, "from-env", "", "read value from env var")
 	fs.StringVar(&fromFile, "from-file", "", "read value from file")
+	fs.StringVar(&expires, "expires", "", "expiry like 30d, 12h, 45m, 90s")
 	fs.BoolVar(&fromStdin, "stdin", false, "read value from stdin")
 	if err := fs.Parse(args); err != nil {
 		return ExitUsage
 	}
-	// Go's flag stops at the first positional arg, so a trailing
-	// "--bind" with no value lands in Args unparsed. Reject it as usage.
+	// Go's flag stops at the first positional arg, so flags after the name
+	// land in Args unparsed. Reject a string flag only when it is dangling:
 	rest := fs.Args()
-	for _, r := range rest {
-		if r == "--bind" || r == "--header" || r == "--kind" || r == "--from-env" || r == "--from-file" {
-			return failUsage(fmt.Sprintf("flag %s requires a value", r))
+	for i, r := range rest {
+		if r == "--bind" || r == "--header" || r == "--kind" || r == "--from-env" || r == "--from-file" || r == "--expires" {
+			if i+1 >= len(rest) || strings.HasPrefix(rest[i+1], "-") {
+				return failUsage(fmt.Sprintf("flag %s requires a value", r))
+			}
 		}
 	}
 	if len(rest) < 1 {
@@ -175,7 +179,11 @@ func cmdAdd(args []string) int {
 		return failRuntime(err)
 	}
 	defer st.Close()
-	sec := vault.Secret{Name: name, Value: val, Kind: kind, Version: 1}
+	exp, err := parseExpires(expires)
+	if err != nil {
+		return failRuntime(err)
+	}
+	sec := vault.Secret{Name: name, Value: val, Kind: kind, Version: 1, ExpiresAt: exp}
 	if header != "" {
 		sec.InjectHdr = []string{header}
 	}
@@ -271,7 +279,11 @@ func cmdLs(args []string) int {
 		return ExitOK
 	}
 	for _, n := range names {
-		fmt.Println(n, placeholder.Canonical(n))
+		mark := ""
+		if sec, err := st.Get(n); err == nil && sec.Expired() {
+			mark = " [expired]"
+		}
+		fmt.Println(n, placeholder.Canonical(n)+mark)
 	}
 	return ExitOK
 }
