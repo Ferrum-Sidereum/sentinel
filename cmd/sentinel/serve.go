@@ -13,11 +13,14 @@ import (
 	"time"
 )
 
-func cmdTrustCA() {
+func cmdTrustCA(args []string) int {
+	fs := newFlagSet("trust-ca", "usage: sentinel trust-ca")
+	if err := fs.Parse(args); err != nil {
+		return ExitUsage
+	}
 	a, err := ca.LoadOrCreate()
 	if err != nil {
-		fmt.Println(err)
-		os.Exit(1)
+		return failRuntime(err)
 	}
 	_ = a
 	caPath := filepath.Join(dataDir(), "ca.pem")
@@ -26,27 +29,31 @@ func cmdTrustCA() {
 	out, err := cmd.CombinedOutput()
 	fmt.Println(string(out))
 	if err != nil {
-		fmt.Println("auto-install failed, install manually:", err)
-		os.Exit(1)
+		fmt.Fprintln(os.Stderr, "auto-install failed, install manually:", err)
+		return ExitRuntime
 	}
 	fmt.Println("installed to user Root store")
+	return ExitOK
 }
 
-func cmdServe(args []string) {
-	addr := "127.0.0.1:18449"
-	if len(args) >= 1 {
-		addr = args[0]
+func cmdServe(args []string) int {
+	fs := newFlagSet("serve", "usage: sentinel serve [--addr ADDR]")
+	var addr string
+	fs.StringVar(&addr, "addr", "127.0.0.1:18449", "listen address")
+	if err := fs.Parse(args); err != nil {
+		return ExitUsage
+	}
+	if fs.NArg() >= 1 {
+		addr = fs.Arg(0)
 	}
 	st, err := openStore()
 	if err != nil {
-		fmt.Println(err)
-		os.Exit(1)
+		return failRuntime(err)
 	}
 	defer st.Close()
 	auth, err := ca.LoadOrCreate()
 	if err != nil {
-		fmt.Println(err)
-		os.Exit(1)
+		return failRuntime(err)
 	}
 	l := openAudit()
 	if l != nil {
@@ -54,32 +61,26 @@ func cmdServe(args []string) {
 	}
 	s, err := egress.Serve(addr, st, auth, l)
 	if err != nil {
-		fmt.Println(err)
-		os.Exit(1)
+		return failRuntime(err)
 	}
 	fmt.Println("egress proxy on", s.Addr)
 	select {}
 }
 
-func cmdRun(args []string) {
-	i := 0
-	for i < len(args) && args[i] != "--" {
-		i++
+func cmdRun(args []string) int {
+	fs := newFlagSet("run", "usage: sentinel run -- <cmd...>")
+	if err := fs.Parse(args); err != nil {
+		return ExitUsage
 	}
-	if i < len(args) && args[i] == "--" {
-		i++
-	}
-	if i >= len(args) {
-		fmt.Println("usage: sentinel run -- <cmd...>")
-		os.Exit(2)
+	rest := fs.Args()
+	if len(rest) == 0 {
+		return failUsage("sentinel run -- <cmd...>")
 	}
 	st, err := openStore()
 	if err != nil {
-		fmt.Println(err)
-		os.Exit(1)
+		return failRuntime(err)
 	}
 	defer st.Close()
-	// env with placeholders
 	names, _ := st.List()
 	env := os.Environ()
 	_ = names
@@ -89,33 +90,38 @@ func cmdRun(args []string) {
 	l, _ := audit.Open(filepath.Join(dataDir(), "audit.jsonl"))
 	s, err := egress.Serve("127.0.0.1:18449", st, auth, l)
 	if err != nil {
-		fmt.Println(err)
-		os.Exit(1)
+		return failRuntime(err)
 	}
 	defer s.Stop()
 	env = append(env, "HTTP_PROXY="+proxy, "HTTPS_PROXY="+proxy,
 		"http_proxy="+proxy, "https_proxy="+proxy,
 		"SSL_CERT_FILE="+filepath.Join(dataDir(), "ca.pem"))
-	c := exec.Command(args[i], args[i+1:]...)
+	c := exec.Command(rest[0], rest[1:]...)
 	c.Env = env
 	c.Stdin, c.Stdout, c.Stderr = os.Stdin, os.Stdout, os.Stderr
 	if err := c.Run(); err != nil {
 		if ee, ok := err.(*exec.ExitError); ok {
 			os.Exit(ee.ExitCode())
 		}
-		fmt.Println(err)
-		os.Exit(1)
+		return failRuntime(err)
 	}
+	return ExitOK
 }
 
 // usage: sentinel llm-serve [listen-addr] [upstream-base]
-func cmdLLMServe(args []string) {
-	addr, up := "127.0.0.1:18450", "https://api.openai.com"
-	if len(args) >= 1 {
-		addr = args[0]
+func cmdLLMServe(args []string) int {
+	fs := newFlagSet("llm-serve", "usage: sentinel llm-serve [--addr ADDR] [--upstream URL]")
+	var addr, up string
+	fs.StringVar(&addr, "addr", "127.0.0.1:18450", "listen address")
+	fs.StringVar(&up, "upstream", "https://api.openai.com", "upstream base URL")
+	if err := fs.Parse(args); err != nil {
+		return ExitUsage
 	}
-	if len(args) >= 2 {
-		up = args[1]
+	if fs.NArg() >= 1 {
+		addr = fs.Arg(0)
+	}
+	if fs.NArg() >= 2 {
+		up = fs.Arg(1)
 	}
 	polPath := filepath.Join(dataDir(), "policy.yaml")
 	p, _ := policy.Load(polPath)
@@ -123,15 +129,14 @@ func cmdLLMServe(args []string) {
 		fmt.Fprintln(os.Stderr, "policy reload:", err)
 	})
 	defer w.Stop()
-	g, err := llm.Serve(addr, up, &p, openAudit())
+	gw, err := llm.Serve(addr, up, &p, openAudit())
 	if err != nil {
-		fmt.Println(err)
-		os.Exit(1)
+		return failRuntime(err)
 	}
 	if st, err := openStore(); err == nil {
-		g.Vault = st
+		gw.Vault = st
 		defer st.Close()
 	}
-	fmt.Println("llm gateway on", g.Addr, "->", up)
+	fmt.Println("llm gateway on", gw.Addr, "->", up)
 	select {}
 }
