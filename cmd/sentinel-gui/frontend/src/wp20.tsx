@@ -11,7 +11,7 @@ export interface TrayState { paused: boolean; gateways: Record<string, boolean>;
 export interface WizardStep { id: string; title: string; done: boolean; cli: string; detail: string }
 export interface SecretMeta { name: string; lastUsed: string; useCount: number; expiry: string; expired: boolean; hosts: string[]; masked: string }
 
-interface Bridge extends Record<string, (...args: never[]) => Promise<never>> {
+interface Bridge {
  ActivityFeed(f: unknown): Promise<FeedPage>;
  PendingApprovals(): Promise<ApprovalRequest[]>;
  ResolveApproval(secret: string, scope: string): Promise<{ allow: boolean; scope: string }>;
