@@ -38,7 +38,51 @@ type Policy struct {
 		Level     string `yaml:"level"`
 		Retention string `yaml:"retention"`
 	} `yaml:"audit"`
+	Approvals Approvals `yaml:"approvals"`
 }
+
+// ApprovalRule is one allow/deny/ask rule. Empty Secret/Consumer/Dest match
+// anything; glob patterns supported. First match wins.
+type ApprovalRule struct {
+	Name     string `yaml:"name"`
+	Secret   string `yaml:"secret"`
+	Consumer string `yaml:"consumer"`
+	Dest     string `yaml:"dest"`
+	Decision string `yaml:"decision"` // allow | deny | ask
+	TTL      string `yaml:"ttl"`      // duration text, e.g. "15m"; "" = single use
+}
+
+// Approvals configures the WP-10 approval broker.
+type Approvals struct {
+	Default          string         `yaml:"default"` // ask | allow | deny; "" = allow (legacy compat, documented)
+	Rules            []ApprovalRule `yaml:"rules"`
+	GrantCache       string         `yaml:"grant_cache"`
+	MaxUsesPerMinute int            `yaml:"max_uses_per_minute"`
+}
+
+// GrantCacheDuration parses GrantCache; "" = 15m.
+func (a Approvals) GrantCacheDuration() time.Duration {
+	if a.GrantCache == "" {
+		return 15 * time.Minute
+	}
+	d, err := time.ParseDuration(a.GrantCache)
+	if err != nil {
+		return 15 * time.Minute
+	}
+	return d
+}
+
+// TTLDuration parses an ApprovalRule TTL; "" or unparsable = 0 (single use).
+func (r ApprovalRule) TTLDuration() time.Duration {
+	if r.TTL == "" {
+		return 0
+	}
+	d, err := time.ParseDuration(r.TTL)
+	if err != nil {
+		return 0
+	}
+	return d
+ }
 
 func Default() Policy {
 	var p Policy

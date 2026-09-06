@@ -43,9 +43,13 @@ func init() {
 	RegisterWiring("allowlist.patterns", nil, "parsed; no reader")
 	RegisterWiring("audit.level", nil, "parsed; audit logger uses fixed level")
 	RegisterWiring("audit.retention", nil, "parsed; no reader")
+	RegisterWiring("approvals.default", []string{"mcp"}, "inject gate in mcp/gateway.go via broker")
+	RegisterWiring("approvals.rules", []string{"mcp"}, "first-match allow/deny/ask with glob secret/consumer in broker/policy.go")
+	RegisterWiring("approvals.grant_cache", []string{"mcp"}, "interactive session-grant TTL")
+	RegisterWiring("approvals.max_uses_per_minute", []string{"mcp"}, "rate limit in broker/policy.go")
 }
 
-// AllFields is the closed set of policy fields explain knows about.
+ // AllFields is the closed set of policy fields explain knows about.
 // Adding a Policy struct field/yaml key WITHOUT registering wiring here
 // (and in init above) fails TestExplainCoverage — by design.
 func AllFields() []string {

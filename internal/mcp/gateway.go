@@ -14,11 +14,12 @@ import (
 	"time"
 
 	"sentinel/internal/audit"
+	"sentinel/internal/broker"
 	"sentinel/internal/placeholder"
 	"sentinel/internal/policy"
 	"sentinel/internal/scrubber"
 	"sentinel/internal/vault"
-)
+ )
 
 // Mode controls secret handling in stdio run:
 //   - "inject": resolve snt:// placeholders in env to real values for child.
@@ -72,6 +73,10 @@ var SkipFields = map[string]bool{
 	"enum":                 true,
 }
 
+// Strict is set by --strict: any approval denial becomes ExitError{4}
+// (broker.ExitApprovalDenied) instead of leaving the placeholder.
+var Strict bool
+
 // RunWithMode is Run with explicit mode. Empty mode defaults to inject.
 func RunWithMode(args []string, mode string, st *vault.Store, p *policy.Policy, l *audit.Logger, sess *scrubber.Session) error {
 	if mode == "" {
@@ -88,6 +93,42 @@ func RunWithMode(args []string, mode string, st *vault.Store, p *policy.Policy, 
 func Run(args []string, st *vault.Store, p *policy.Policy, l *audit.Logger, sess *scrubber.Session) error {
 	return runInner(args, ModeInject, st, p, l, sess)
 }
+
+// vaultStore adapts *vault.Store to broker.SecretStore.
+type vaultStore struct{ st *vault.Store }
+
+func (v vaultStore) Resolve(name string) (broker.SecretValue, error) {
+	sec, err := v.st.Resolve(name)
+	if err != nil {
+		return broker.SecretValue{}, err
+	}
+	return broker.SecretValue{Value: sec.Value}, nil
+}
+
+// defaultBrokerFor builds the gate for inject mode. Legacy compat (documented):
+// empty approvals.default means allow — old policies without an approvals:
+// section behave exactly as before. Explicit ask/deny enforce the gate.
+func defaultBrokerFor(p *policy.Policy, l *audit.Logger) broker.Broker {
+	emit := func(event string, req broker.Request, dec broker.Decision) {
+		if l != nil {
+			l.Log("", event, map[string]any{
+				"secret": req.Secret, "consumer": req.Consumer, "dest": req.Dest,
+				"reason": req.Reason, "decision": dec.Allow, "rule": dec.Rule,
+			})
+		}
+	}
+	def := p.Approvals.Default
+	if def == "" {
+		def = "allow"
+		ap := p.Approvals
+		ap.Default = "allow"
+		return broker.NewPolicy(ap, emit)
+	}
+	if def == "ask" {
+		return broker.NewInteractive(os.Stdin, os.Stderr, p.Approvals.GrantCacheDuration(), emit)
+	}
+	return broker.NewPolicy(p.Approvals, emit)
+ }
 
 func runInner(args []string, mode string, st *vault.Store, p *policy.Policy, l *audit.Logger, sess *scrubber.Session) error {
 	i := 0
@@ -130,19 +171,38 @@ func runInner(args []string, mode string, st *vault.Store, p *policy.Policy, l *
 
 	env := os.Environ()
 	if mode == ModeInject {
+		br := defaultBrokerFor(p, l)
+		child := args[i]
+		if k := strings.LastIndex(child, "/"); k >= 0 {
+			child = child[k+1:]
+		}
+		if k := strings.LastIndex(child, "\\"); k >= 0 {
+			child = child[k+1:]
+		}
+		consumer := "mcp:" + profile + ":" + child
+		ctx := context.Background()
 		for idx, kv := range env {
 			if parts := strings.SplitN(kv, "=", 2); len(parts) == 2 {
 				resolved := parts[1]
 				changed := false
+				denied := false
 				for _, ph := range placeholder.Find(parts[1]) {
 					name := strings.TrimPrefix(ph, "snt://")
-					sec, err := st.Get(name)
-					if err != nil {
-						continue
+					val, _, err := broker.Resolve(ctx, br, vaultStore{st}, broker.Request{
+						Secret: name, Consumer: consumer, Dest: child,
+						Reason:   "env injection",
+						Requested: time.Now(),
+					})
+					if err != nil || val == nil {
+						denied = true
+						continue // leave placeholder; child fails on its own terms
 					}
-					resolved = strings.ReplaceAll(resolved, ph, string(sec.Value))
-					zero(sec.Value)
+					resolved = strings.ReplaceAll(resolved, ph, string(val))
+					zero(val)
 					changed = true
+				}
+				if denied && Strict {
+					return &ExitError{Err: fmt.Errorf("approval denied"), Code: broker.ExitApprovalDenied}
 				}
 				if changed {
 					env[idx] = parts[0] + "=" + resolved

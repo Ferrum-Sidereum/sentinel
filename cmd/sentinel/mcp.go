@@ -14,10 +14,13 @@ import (
 )
 
 func cmdMCP(args []string) int {
-	fs := newFlagSet("mcp", "usage: sentinel mcp run [--mode inject|proxy] [--profile NAME] -- <cmd...>\n       sentinel mcp serve [listen-addr] [upstream-url]")
+	fs := newFlagSet("mcp", "usage: sentinel mcp run [--mode inject|proxy] [--profile NAME] [--strict] [--yes-i-know] -- <cmd...>\n       sentinel mcp serve [listen-addr] [upstream-url]")
 	var mode, profile string
+	var strict, yesIKnow bool
 	fs.StringVar(&mode, "mode", mcp.ModeInject, "run mode: inject|proxy")
 	fs.StringVar(&profile, "profile", "", "profile name")
+	fs.BoolVar(&strict, "strict", false, "denied approvals exit 4 instead of leaving snt:// placeholder")
+	fs.BoolVar(&yesIKnow, "yes-i-know", false, "auto-allow all approvals (demos/tests only, never default)")
 	if err := fs.Parse(args); err != nil {
 		return ExitUsage
 	}
@@ -38,6 +41,11 @@ func cmdMCP(args []string) int {
 	p, _ := policy.Load(polPath)
 	if mode != mcp.ModeInject && mode != mcp.ModeProxy {
 		return failUsage("invalid --mode (inject|proxy)")
+	}
+	mcp.Strict = strict
+	if yesIKnow {
+		p.Approvals.Default = "allow"
+		p.Approvals.Rules = nil
 	}
 	sess := scrubber.NewSession(24 * time.Hour)
 	if err := mcp.RunWithMode(rest, mode, st, &p, openAudit(), sess); err != nil {
