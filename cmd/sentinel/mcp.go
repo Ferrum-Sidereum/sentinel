@@ -1,12 +1,15 @@
 package main
 
 import (
-	"fmt"
+	"context"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"time"
 
 	"sentinel/internal/mcp"
 	"sentinel/internal/policy"
+	"sentinel/internal/runtime"
 	"sentinel/internal/scrubber"
 )
 
@@ -43,16 +46,45 @@ func cmdMCP(args []string) int {
 	return ExitOK
 }
 
-// usage: sentinel mcp serve [listen-addr] [upstream-url]
+// usage: sentinel mcp serve [--port N] [listen-addr] [upstream-url]
 func cmdMCPServe(args []string) int {
 	addr := "127.0.0.1:18450"
-	if len(args) >= 1 {
-		addr = args[0]
-	}
 	upstream := "http://127.0.0.1:3000"
-	if len(args) >= 2 {
-		upstream = args[1]
+	var port int = -1
+	rest := args
+	// Pre-scan --port/--port=N before positional args.
+	var positional []string
+	for i := 0; i < len(rest); i++ {
+		a := rest[i]
+		if a == "--port" && i+1 < len(rest) {
+			if n, err := strconv.Atoi(rest[i+1]); err == nil {
+				port = n
+			}
+			i++
+			continue
+		}
+		if strings.HasPrefix(a, "--port=") {
+			if n, err := strconv.Atoi(strings.TrimPrefix(a, "--port=")); err == nil {
+				port = n
+			}
+			continue
+		}
+		positional = append(positional, a)
 	}
+	if len(positional) >= 1 {
+		addr = positional[0]
+	}
+	if len(positional) >= 2 {
+		upstream = positional[1]
+	}
+	port = runtime.ResolvePort(port, runtime.EnvMCPPort, runtime.DefaultMCPPort)
+	addr = runtime.ResolveAddr(addr, "127.0.0.1", port, runtime.DefaultMCPPort)
+	// Pre-bind to surface errors with a helpful hint and to resolve :0.
+	ln, err := runtime.Listen(addr)
+	if err != nil {
+		return failRuntime(err)
+	}
+	_ = ln.Close()
 	st, err := openStore()
 	if err != nil {
 		return failRuntime(err)
@@ -61,10 +93,20 @@ func cmdMCPServe(args []string) int {
 	polPath := filepath.Join(dataDir(), "policy.yaml")
 	p, _ := policy.Load(polPath)
 	sess := scrubber.NewSession(24 * time.Hour)
-	srv, err := mcp.ServeHTTP(addr, upstream, st, &p, openAudit(), sess)
-	if err != nil {
-		return failRuntime(err)
+	l := openAudit()
+	if l != nil {
+		defer l.Close()
 	}
-	fmt.Println("mcp proxy on", srv.Addr, "->", upstream)
-	select {}
+	srv, err := mcp.ServeHTTP(addr, upstream, st, &p, l, sess)
+	if err != nil {
+		flushAudit(l)
+		return failRuntime(runtime.WrapBind(addr, err))
+	}
+	_ = runtime.WriteRunFile(dataDir(), runtime.ServiceMCP, addr, version)
+	sess2 := &serveSession{dataDir: dataDir(), service: runtime.ServiceMCP, audit: l, stop: func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = srv.Shutdown(ctx)
+	}}
+	return runServeLoop("mcp proxy on "+addr+" -> "+upstream, sess2, nil)
 }
