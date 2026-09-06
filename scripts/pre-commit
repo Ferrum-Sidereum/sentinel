@@ -1,0 +1,10 @@
+#!/bin/sh
+# sentinel pre-commit hook: scans staged content (git index, not worktree).
+# Install: cp scripts/pre-commit /path/to/repo/.git/hooks/pre-commit && chmod +x .git/hooks/pre-commit
+# Or: git config core.hooksPath scripts (if scripts/ contains this file as pre-commit).
+set -eu
+if ! command -v sentinel >/dev/null 2>&1; then
+  echo "sentinel not on PATH; skipping scan" >&2
+  exit 0
+fi
+sentinel scan --staged

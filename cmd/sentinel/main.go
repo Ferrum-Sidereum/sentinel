@@ -3,8 +3,6 @@ package main
 import (
 	"bufio"
 	"bytes"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -16,8 +14,6 @@ import (
 	"sentinel/internal/keyring"
 	"sentinel/internal/memguard"
 	"sentinel/internal/placeholder"
-	"sentinel/internal/policy"
-	"sentinel/internal/scrubber"
 	"sentinel/internal/termsecret"
 	"sentinel/internal/vault"
 )
@@ -339,25 +335,112 @@ func cmdEnv(args []string) int {
 }
 
 func cmdScan(args []string) int {
-	fs := newFlagSet("scan", "usage: sentinel scan [--show-values] [--json] [file]")
+	fs := newFlagSet("scan", `usage: sentinel scan [flags] [file|dir...]
+
+CI gate contract (stable): exit 0 = clean, 3 = findings at or above
+threshold, 1 = operational error, 2 = usage error.
+
+Flags:
+  --show-values      print matched values (interactive TTY only)
+  --json             legacy JSON output (same as --format json)
+  --format text|json|sarif
+                     output format (default text)
+  --min-confidence F only gate on findings with confidence >= F (default 0)
+  --fail-on T,T      only gate on finding types (e.g. AWS_KEY,SECRET:token);
+                     other findings are still printed but do not fail the gate
+  --redact / --no-redact
+                     text output never prints values; --redact is default in
+                     non-TTY and a no-op otherwise (kept for CI scripts)
+  --no-ignore        do not honour .gitignore / .sentinelignore when
+                     scanning directories
+  --staged           scan staged git content (git index) for pre-commit hooks
+
+Directory scan: every directory arg is walked recursively. .gitignore and
+.sentinelignore in the scanned root share the same syntax, one pattern per
+line: blank lines and # comments ignored; trailing / matches directories
+only; patterns containing / are path-anchored (matched against the
+slash-separated path relative to the scanned root); patterns without /
+match the basename in any directory; leading ! negates (re-includes);
+last matching pattern wins. .git is always skipped.`)
 	var showValues bool
+	var formatFlag string
+	var minConf float64
+	var failOnFlag string
+	var redactFlag bool
+	var noRedactFlag bool
+	var noIgnore bool
+	var staged bool
 	fs.BoolVar(&showValues, "show-values", false, "print matched values (TTY only)")
+	fs.StringVar(&formatFlag, "format", "", "output format: text|json|sarif")
+	fs.Float64Var(&minConf, "min-confidence", 0, "gate threshold on confidence")
+	fs.StringVar(&failOnFlag, "fail-on", "", "comma-separated finding types that fail the gate")
+	fs.BoolVar(&redactFlag, "redact", false, "redact values (default in non-TTY)")
+	fs.BoolVar(&noRedactFlag, "no-redact", false, "disable redaction")
+	fs.BoolVar(&noIgnore, "no-ignore", false, "ignore .gitignore/.sentinelignore")
+	fs.BoolVar(&staged, "staged", false, "scan staged git content (index)")
 	if err := fs.Parse(args); err != nil {
 		return ExitUsage
 	}
-	files := fs.Args()
+	format := formatFlag
+	if format == "" && g.json {
+		format = "json"
+	}
+	if format == "" {
+		format = "text"
+	}
+	switch format {
+	case "text", "json", "sarif":
+	default:
+		return failUsage("unknown --format " + format + " (want text|json|sarif)")
+	}
+	failOn := parseFailOn(failOnFlag)
+	_ = redactMode(termsecret.IsTTY(os.Stdout), redactOpt(redactFlag, noRedactFlag))
 	if showValues && !termsecret.IsTTY(os.Stdout) {
 		fmt.Fprintln(os.Stderr, "refusing --show-values on non-interactive output")
 		return ExitBlocked
 	}
-	var text string
-	if len(files) > 0 {
-		b, err := os.ReadFile(files[0])
+	if showValues && format == "sarif" {
+		return failUsage("--show-values cannot be combined with --format sarif")
+	}
+	if staged && len(fs.Args()) > 0 {
+		return failUsage("--staged takes no file args (scans the git index)")
+	}
+	allow := loadAllowlist()
+	var vm vault.Matcher
+	if m, cleanup, err := openMatcher(); err == nil {
+		vm = m
+		defer cleanup()
+	}
+	var inputs []scanInput
+	readOne := func(name string, b []byte) {
+		inputs = append(inputs, scanInput{name, string(b)})
+	}
+	switch {
+	case staged:
+		files, err := stagedFiles()
 		if err != nil {
 			return failRuntime(err)
 		}
-		text = string(b)
-	} else {
+		for _, f := range files {
+			b, err := stagedBlob(f)
+			if err != nil {
+				return failRuntime(err)
+			}
+			readOne(f, b)
+		}
+	case len(fs.Args()) > 0:
+		files, err := collectFiles(fs.Args(), noIgnore)
+		if err != nil {
+			return failRuntime(err)
+		}
+		for _, f := range files {
+			b, err := os.ReadFile(f)
+			if err != nil {
+				return failRuntime(err)
+			}
+			readOne(f, b)
+		}
+	default:
 		r := bufio.NewReader(os.Stdin)
 		var sb strings.Builder
 		for {
@@ -367,68 +450,87 @@ func cmdScan(args []string) int {
 				break
 			}
 		}
-		text = sb.String()
+		readOne("", []byte(sb.String()))
 	}
-	p, _ := policy.Load(filepath.Join(dataDir(), "policy.yaml"))
-	allow := map[string]bool{}
-	for _, v := range p.Allowlist.Values {
-		allow[v] = true
-	}
-	var vm vault.Matcher
-	if st, err := openStore(); err == nil {
-		if m, err := st.NewMatcher(); err == nil {
-			vm = m
-			defer m.Close()
+	var all []gateFinding
+	var placeholders []string
+	for _, in := range inputs {
+		for _, m := range placeholder.Find(in.text) {
+			placeholders = append(placeholders, m)
 		}
-		defer st.Close()
+		all = append(all, scanText(in.name, in.text, vm, allow)...)
 	}
-	placeholders := []string{}
-	for _, m := range placeholder.Find(text) {
-		placeholders = append(placeholders, m)
-	}
-	findings := scrubber.ScanWithMatcher(text, vm, allow, nil)
-	if g.json {
-		type finding struct {
-			Type       string  `json:"type"`
-			Detector   string  `json:"detector"`
-			Confidence float64 `json:"confidence"`
-			Line       int     `json:"line"`
-			Col        int     `json:"col"`
-			FP         string  `json:"fp"`
-			Value      string  `json:"value,omitempty"`
-		}
-		out := []finding{}
-		for _, f := range findings {
-			line, col := lineCol(text, f.Span[0])
-			sum := sha256.Sum256([]byte(f.Value))
-			fd := finding{f.Type, f.Detector, f.Confidence, line, col, hex.EncodeToString(sum[:])[:8], ""}
+	failing := gateFilter(all, minConf, failOn)
+	switch format {
+	case "json":
+		out := jsonGateOut{}
+		for _, f := range all {
+			jf := jsonGateFinding{f.File, f.Type, f.Detector, f.Confidence, f.Line, f.Col, f.FP, ""}
 			if showValues {
-				fd.Value = f.Value
+				jf.Value = valueOf(inText(inputs, f.File), f)
 			}
-			out = append(out, fd)
+			out.Findings = append(out.Findings, jf)
 		}
-		emitJSON(map[string]any{"findings": out, "placeholders": placeholders})
+		if out.Findings == nil {
+			out.Findings = []jsonGateFinding{}
+		}
+		emitJSON(map[string]any{"findings": out.Findings, "placeholders": placeholders})
 		if showValues {
 			fmt.Fprintln(os.Stderr, "WARNING: printing matched secret values to an interactive terminal")
 		}
-		return ExitOK
-	}
-	for _, m := range placeholders {
-		fmt.Println("PLACEHOLDER", m)
-	}
-	if showValues {
-		fmt.Fprintln(os.Stderr, "WARNING: printing matched secret values to an interactive terminal")
-	}
-	for _, f := range findings {
-		line, col := lineCol(text, f.Span[0])
-		sum := sha256.Sum256([]byte(f.Value))
-		if showValues {
-			fmt.Printf("%s [%s conf=%.2f] %d:%d fp=%s %q\n", f.Type, f.Detector, f.Confidence, line, col, hex.EncodeToString(sum[:])[:8], f.Value)
-			continue
+	case "sarif":
+		emitJSON(sarifOf(all))
+	default:
+		for _, m := range placeholders {
+			fmt.Println("PLACEHOLDER", m)
 		}
-		fmt.Printf("%s [%s conf=%.2f] %d:%d fp=%s\n", f.Type, f.Detector, f.Confidence, line, col, hex.EncodeToString(sum[:])[:8])
+		if showValues {
+			fmt.Fprintln(os.Stderr, "WARNING: printing matched secret values to an interactive terminal")
+		}
+		emitGateText(all)
+		if showValues {
+			for _, f := range all {
+				fmt.Printf("  value %s: %q\n", f.FP, valueOf(inText(inputs, f.File), f))
+			}
+		}
+	}
+	if len(failing) > 0 {
+		return ExitBlocked
 	}
 	return ExitOK
+}
+
+func redactOpt(redact, noRedact bool) *bool {
+	if redact && noRedact {
+		return nil
+	}
+	if redact {
+		b := true
+		return &b
+	}
+	if noRedact {
+		b := false
+		return &b
+	}
+	return nil
+}
+
+func inText(inputs []scanInput, file string) string {
+	for _, in := range inputs {
+		if in.name == file {
+			return in.text
+		}
+	}
+	return ""
+}
+
+// valueOf re-derives a finding value for --show-values (TTY only).
+func valueOf(text string, f gateFinding) string {
+	lines := strings.Split(text, "\n")
+	if f.Line-1 < 0 || f.Line-1 >= len(lines) {
+		return ""
+	}
+	return strings.TrimSpace(lines[f.Line-1])
 }
 
 func lineCol(text string, off int) (line, col int) {
