@@ -39,6 +39,7 @@ func init() {
 		command{"rotate", "rotate a secret value", "sentinel rotate <name> [--from-env E|--from-file P|--stdin]", cmdRotate},
 		command{"migrate-key", "migrate legacy passphrase file to key.json KDF", "sentinel migrate-key", cmdMigrateKeyAdapter},
 		command{"rollback", "restore previous secret version", "sentinel rollback <name>", cmdRollbackAdapter},
+		command{"doctor", "diagnose setup (PATH, keychain, vault, policy, CA, ports)", "sentinel doctor [--json]", cmdDoctor},
 	)
 }
 
