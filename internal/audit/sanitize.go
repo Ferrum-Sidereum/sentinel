@@ -79,7 +79,7 @@ func looksSecret(s string) bool {
 
 // MarshalEvent renders a log line with sanitized fields (for tests/CI).
 func MarshalEvent(session, typ string, fields map[string]any) string {
-	e := Event{Type: typ, Session: session, Fields: Sanitize(fields)}
+	e := Record{Type: typ, Session: session, Fields: Sanitize(fields)}
 	b, _ := json.Marshal(e)
 	return string(b)
 }

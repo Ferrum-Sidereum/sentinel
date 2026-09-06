@@ -75,7 +75,8 @@ func openStore() (*vault.Store, error) {
 }
 
 func openAudit() *audit.Logger {
-	l, _ := audit.Open(filepath.Join(dataDir(), "audit.jsonl"))
+	p, _ := policy.Load(filepath.Join(dataDir(), "policy.yaml"))
+	l, _ := audit.Open(filepath.Join(dataDir(), "audit.jsonl"), audit.WithMaxAge(audit.ParseRetention(p.Audit.Retention)))
 	return l
 }
 
