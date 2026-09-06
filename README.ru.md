@@ -36,9 +36,29 @@
 
 ## Установка
 
+### Готовые файлы релиза (Go не нужен)
+
+Скачайте архив под свою платформу со страницы GitHub Releases (`sentinel_<версия>_<ОС>_<архитектура>.tar.gz`/`.zip`), распакуйте, проверьте контрольные суммы и версию:
+
+```bash
+sha256sum -c checksums.txt
+./sentinel version
+```
+
+Homebrew и Scoop описаны в [`packaging/`](packaging/README.md):
+
+```bash
+brew tap Ferrum-Sidereum/sentinel && brew install sentinel
+```
+
+```powershell
+scoop bucket add sentinel https://github.com/Ferrum-Sidereum/scoop-sentinel
+scoop install sentinel
+```
+
 ### CLI из исходников
 
-Понадобятся Git, версия Go из [go.mod](go.mod) и доступ к системному хранилищу учётных данных. Сейчас модуль указывает **Go 1.27.0**. Проверьте доступность этой версии и закреплённых зависимостей в своей среде; если они недоступны, установка заблокирована. Просто уменьшить номер версии в файле недостаточно для подтверждения совместимости. Node.js и Wails для CLI не нужны.
+Понадобятся Git, версия Go из [go.mod](go.mod) и доступ к системному хранилищу учётных данных. Сейчас модуль указывает **Go 1.27.0**.
 
 ```bash
 git clone https://github.com/Ferrum-Sidereum/sentinel.git
@@ -48,19 +68,7 @@ go mod download
 go install ./cmd/sentinel
 ```
 
-`go install` помещает исполняемый файл в `GOBIN`, а если переменная не задана, в каталог `bin` первого пути из `GOPATH`. Добавьте этот каталог в `PATH`. Для стандартной конфигурации Go:
-
-```bash
-# macOS / Linux, для текущего сеанса оболочки
-export PATH="$(go env GOPATH)/bin:$PATH"
-```
-
-```powershell
-# Windows PowerShell, для текущего сеанса
-$env:Path = "$(go env GOPATH)\bin;$env:Path"
-```
-
-Если у вас задан `GOBIN`, используйте его. Далее предполагается, что `sentinel` доступен в `PATH`. Это инструкция по сборке из исходников, а не обещание готовых релизных файлов или проверенной поддержки платформ.
+`go install` помещает исполняемый файл в `GOBIN`, а если переменная не задана, в каталог `bin` первого пути из `GOPATH`. Добавьте этот каталог в `PATH`. Сборка из исходников необязательна — готовые файлы доступны на странице релизов.
 
 ### Разработка десктопа (необязательно)
 

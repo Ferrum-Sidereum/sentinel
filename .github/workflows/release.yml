@@ -1,0 +1,70 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go build ./internal/... ./cmd/sentinel/
+      - run: go test ./cmd/sentinel/...
+      - uses: sigstore/cosign-installer@v3
+      - uses: goreleaser/goreleaser-action@v6
+        with:
+          distribution: goreleaser
+          version: "~> v2"
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  smoke:
+    needs: release
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download release archives
+        uses: robinraju/release-downloader@v1
+        with:
+          tag: ${{ github.ref_name }}
+          fileName: "*"
+          out-file-path: dist-smoke
+      - name: Verify checksums
+        shell: bash
+        run: |
+          cd dist-smoke
+          sha256sum -c checksums.txt
+      - name: Verify cosign signature of checksums
+        shell: bash
+        run: |
+          cd dist-smoke
+          cosign verify-blob \
+            --cert-identity-regexp 'https://github.com/Ferrum-Sidereum/sentinel.*' \
+            --cert-oidc-issuer https://token.actions.githubusercontent.com \
+            --cert checksums.txt.pem \
+            --signature checksums.txt.sig \
+            checksums.txt
+      - name: Extract and run sentinel version
+        shell: bash
+        run: |
+          cd dist-smoke
+          case "${{ runner.os }}" in
+            Windows) unzip -o 'sentinel_*_windows_*.zip' && ./sentinel.exe version ;;
+            macOS) tar xzf sentinel_*_macOS_*.tar.gz 2>/dev/null || tar xzf sentinel_*_darwin_*.tar.gz; ./sentinel version ;;
+            Linux) tar xzf sentinel_*_Linux_*.tar.gz 2>/dev/null || tar xzf sentinel_*_linux_*.tar.gz; ./sentinel version ;;
+          esac
