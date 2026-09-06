@@ -5,12 +5,43 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"time"
 
 	"sentinel/internal/memguard"
 	"sentinel/internal/placeholder"
 	"sentinel/internal/vault"
 )
+
+// parseExpires accepts durations like 30d, 12h, 45m, 90s (d=24h) and returns
+// the absolute expiry time. Empty input returns nil.
+func parseExpires(s string) (*time.Time, error) {
+	if s == "" {
+		return nil, nil
+	}
+	mult := time.Second
+	num := s
+	switch {
+	case strings.HasSuffix(s, "d"):
+		mult = 24 * time.Hour
+		num = strings.TrimSuffix(s, "d")
+	case strings.HasSuffix(s, "h"):
+		mult = time.Hour
+		num = strings.TrimSuffix(s, "h")
+	case strings.HasSuffix(s, "m"):
+		mult = time.Minute
+		num = strings.TrimSuffix(s, "m")
+	case strings.HasSuffix(s, "s"):
+		num = strings.TrimSuffix(s, "s")
+	}
+	n, err := strconv.Atoi(num)
+	if err != nil || n <= 0 {
+		return nil, fmt.Errorf("invalid --expires %q: use e.g. 30d, 12h", s)
+	}
+	t := time.Now().Add(time.Duration(n) * mult)
+	return &t, nil
+}
 
 // sentinel env import --bind host [--prefix P] [file]
 // stdin or file with KEY=VALUE lines; values stored as secrets named lower(KEY).
@@ -156,15 +187,36 @@ func cmdRotate(args []string) {
 		fmt.Println(err)
 		os.Exit(1)
 	}
-	old.Value = append([]byte(nil), val...)
-	old.Version++
-	if err := st.Put(old); err != nil {
+	if err := st.Rotate(name, val, vault.DefaultKeepVersions); err != nil {
 		fmt.Println(err)
 		os.Exit(1)
 	}
 	if l := openAudit(); l != nil {
-		l.Log("", "secret_rotated", map[string]any{"name": name, "version": old.Version})
+		l.Log("", "secret_rotated", map[string]any{"name": name, "version": old.Version + 1})
 		l.Close()
 	}
-	fmt.Println("rotated", name, "v", old.Version)
+	fmt.Println("rotated", name, "v", old.Version+1)
+}
+
+// sentinel rollback <name> : restore the most recent retained version.
+func cmdRollback(args []string) {
+	if len(args) < 1 {
+		fmt.Println("usage: sentinel rollback <name>")
+		os.Exit(2)
+	}
+	st, err := openStore()
+	if err != nil {
+		fmt.Println(err)
+		os.Exit(1)
+	}
+	defer st.Close()
+	if err := st.Rollback(args[0]); err != nil {
+		fmt.Println(err)
+		os.Exit(1)
+	}
+	if l := openAudit(); l != nil {
+		l.Log("", "secret_rolled_back", map[string]any{"name": args[0]})
+		l.Close()
+	}
+	fmt.Println("rolled back", args[0])
 }

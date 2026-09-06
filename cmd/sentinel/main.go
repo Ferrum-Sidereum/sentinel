@@ -78,6 +78,8 @@ func main() {
 		cmdAudit(os.Args[2:])
 	case "rotate":
 		cmdRotate(os.Args[2:])
+	case "rollback":
+		cmdRollback(os.Args[2:])
 	default:
 		usage()
 		os.Exit(2)
@@ -132,6 +134,7 @@ func cmdAdd(args []string) {
 	}
 	name := args[0]
 	bind, header, kind := "", "", "bearer"
+	expires := ""
 	fromEnv, fromFile, fromStdin := "", "", false
 	for i := 1; i < len(args); i++ {
 		switch args[i] {
@@ -144,6 +147,9 @@ func cmdAdd(args []string) {
 		case "--kind":
 			i++
 			kind = args[i]
+		case "--expires":
+			i++
+			expires = args[i]
 		case "--from-env":
 			i++
 			fromEnv = args[i]
@@ -170,7 +176,12 @@ func cmdAdd(args []string) {
 		os.Exit(1)
 	}
 	defer st.Close()
-	sec := vault.Secret{Name: name, Value: val, Kind: kind, Hosts: []string{bind}, Version: 1}
+	exp, err := parseExpires(expires)
+	if err != nil {
+		fmt.Println(err)
+		os.Exit(1)
+	}
+	sec := vault.Secret{Name: name, Value: val, Kind: kind, Hosts: []string{bind}, Version: 1, ExpiresAt: exp}
 	if header != "" {
 		sec.InjectHdr = []string{header}
 	}
@@ -247,7 +258,11 @@ func cmdLs() {
 		os.Exit(1)
 	}
 	for _, n := range names {
-		fmt.Println(n, placeholder.Canonical(n))
+		mark := ""
+		if sec, err := st.Get(n); err == nil && sec.Expired() {
+			mark = " [expired]"
+		}
+		fmt.Println(n, placeholder.Canonical(n)+mark)
 	}
 }
 
