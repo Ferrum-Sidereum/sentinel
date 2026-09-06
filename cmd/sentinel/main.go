@@ -28,8 +28,26 @@ func dataDir() string {
 }
 
 func openStore() (*vault.Store, error) {
-	if err := os.MkdirAll(dataDir(), 0700); err != nil {
+	dir := dataDir()
+	if err := os.MkdirAll(dir, 0700); err != nil {
 		return nil, err
+	}
+	if keyring.HasPassphrase(dir) {
+		pw, err := termsecret.Read("Enter passphrase: ")
+		if err != nil {
+			return nil, err
+		}
+		defer memguard.Zero(pw)
+		key, err := keyring.OpenPassphrase(dir, pw)
+		if err != nil {
+			return nil, err
+		}
+		defer memguard.Zero(key)
+		k := make([]byte, 32)
+		copy(k, key)
+		st, err := vault.Open(filepath.Join(dir, "vault.db"), k)
+		memguard.Zero(k)
+		return st, err
 	}
 	key, err := keyring.Load()
 	if err != nil {
@@ -54,6 +72,8 @@ func main() {
 	switch os.Args[1] {
 	case "init":
 		cmdInit()
+	case "migrate-key":
+		cmdMigrateKey()
 	case "add":
 		cmdAdd(os.Args[2:])
 	case "ls":
@@ -94,6 +114,12 @@ func cmdInit() {
 	def := filepath.Join(dir, "policy.yaml")
 	if _, err := os.Stat(def); os.IsNotExist(err) {
 		os.WriteFile(def, []byte("defaults:\n  unknown_host: tunnel\n  scrub_to_llm: pseudonymize\n  scrub_to_untrusted: mask\n  confidence_threshold: 0.7\naudit:\n  level: events\n  retention: 30d\n"), 0o600)
+	}
+	for _, a := range os.Args[2:] {
+		if a == "--passphrase" {
+			cmdInitPassphrase(dir)
+			return
+		}
 	}
 	key, err := keyring.Load()
 	switch {
